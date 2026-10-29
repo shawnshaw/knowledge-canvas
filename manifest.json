@@ -1,0 +1,9 @@
+{
+  "id": "knowledge-canvas",
+  "name": "Knowledge Canvas",
+  "version": "0.3.0",
+  "minAppVersion": "1.5.0",
+  "description": "Organize and edit Markdown-backed notes on a spatial canvas.",
+  "author": "Oscar Shao",
+  "isDesktopOnly": true
+}
