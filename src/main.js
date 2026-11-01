@@ -1,5 +1,12 @@
-import { Notice, Plugin } from 'obsidian';
+import { Notice, Plugin, TFolder } from 'obsidian';
 import { BOARD_FOLDER, DEFAULT_BOARD_PATH, boardPathForName, isAllowedBoardPath, listManagedBoards, listReadFlowBoards } from './board-catalog.js';
+import {
+  applyBoardRename,
+  canManageBoard,
+  isInsideFolderPath,
+  rewriteFolderReferences,
+  updateReadFlowBindings,
+} from './board-management.js';
 import { createBoard, updateFilePath } from './board-model.js';
 import { createBoardMeta } from './board-meta.js';
 import { BoardStore } from './board-store.js';
@@ -32,6 +39,10 @@ export default class KnowledgeCanvasPlugin extends Plugin {
     this.readFlowIntegrationListeners = new Set();
     // Concurrent first opens of the same board share one create instead of racing.
     this.readFlowEnsureQueues = new Map();
+    // Renaming a board's note folder fires one Vault rename per file inside it. The view
+    // that started the rename rewrites its own references as part of that lifecycle, so its
+    // handler must not also queue a (refused, paused) write for every child.
+    this.renameSuppressions = new Set();
 
     this.addSettingTab(new KnowledgeCanvasSettingTab(this.app, this));
     this.registerView(VIEW_TYPE_KNOWLEDGE_CANVAS, (leaf) => new KnowledgeCanvasView(leaf, this));
@@ -116,6 +127,185 @@ export default class KnowledgeCanvasPlugin extends Plugin {
     }
     await this.app.vault.create(path, JSON.stringify(board, null, 2));
     return path;
+  }
+
+  /** Every Vault `.canvas`, for rename/delete validation against the live file system. */
+  listCanvasPaths() {
+    return this.app.vault.getFiles()
+      .filter((file) => file.extension === 'canvas')
+      .map((file) => file.path);
+  }
+
+  /** Every Vault file, for the dedicated-folder safety analysis. */
+  listFilePaths() {
+    return this.app.vault.getFiles().map((file) => file.path);
+  }
+
+  /** Every Vault folder, for target-conflict checks. */
+  listFolderPaths() {
+    return this.app.vault.getAllLoadedFiles()
+      .filter((item) => item instanceof TFolder)
+      .map((folder) => folder.path)
+      .filter(Boolean);
+  }
+
+  /**
+   * Renames a managed board, optionally moving the note folder that belongs to it.
+   *
+   * The order is the one the design fixes: verify against the live Vault → rename the folder
+   * → rewrite this board's metadata and references → repoint every other board that pointed
+   * into the folder → rename the canvas → update settings and live surfaces. A failure after
+   * the first move rolls back what moved; a rollback that also fails reports both paths
+   * instead of pretending the rename succeeded.
+   */
+  async renameBoard(plan, { board = null, token = null } = {}) {
+    const manage = canManageBoard(plan?.fromPath);
+    if (!manage.allowed) throw new Error(manage.reason);
+    if (!this.app.vault.getAbstractFileByPath(plan.fromPath)?.stat) throw new Error('画布不存在');
+    if (this.app.vault.getAbstractFileByPath(plan.toPath)) throw new Error(`画布已存在：${plan.toPath}`);
+    if (plan.noteFolder && this.app.vault.getAbstractFileByPath(plan.noteFolder.to)) {
+      throw new Error(`专属笔记文件夹已存在：${plan.noteFolder.to}`);
+    }
+
+    const nextBoard = board ? applyBoardRename(board, plan) : board;
+    let folderMoved = false;
+    let boardSaved = false;
+    // Renaming the folder renames every file inside it, and each of those fires a Vault
+    // rename event. This view already rewrites its own references below, and its queue is
+    // paused for the lifecycle, so its handler is muted for exactly that window.
+    const suppression = plan.noteFolder && token ? { folder: plan.noteFolder.from, view: token } : null;
+    if (suppression) this.renameSuppressions.add(suppression);
+    try {
+      if (plan.noteFolder) {
+        const folder = this.app.vault.getAbstractFileByPath(plan.noteFolder.from);
+        if (folder) {
+          await this.app.fileManager.renameFile(folder, plan.noteFolder.to);
+          folderMoved = true;
+        }
+      }
+      if (nextBoard && nextBoard !== board) {
+        await this.boardStore.save(plan.fromPath, nextBoard, { token });
+        boardSaved = true;
+      }
+      if (folderMoved) await this.repointBoardsForFolder(plan.noteFolder, plan.fromPath);
+      await this.app.fileManager.renameFile(
+        this.app.vault.getAbstractFileByPath(plan.fromPath),
+        plan.toPath,
+      );
+    } catch (error) {
+      const recovery = [];
+      if (boardSaved) {
+        try {
+          await this.boardStore.save(plan.fromPath, board, { token });
+        } catch (restoreError) {
+          recovery.push(`画布内容恢复失败：${restoreError.message}`);
+        }
+      }
+      if (folderMoved) {
+        try {
+          await this.app.fileManager.renameFile(
+            this.app.vault.getAbstractFileByPath(plan.noteFolder.to),
+            plan.noteFolder.from,
+          );
+        } catch (restoreError) {
+          recovery.push(`专属笔记文件夹已重命名为 ${plan.noteFolder.to}，恢复失败：${restoreError.message}`);
+        }
+      }
+      throw new Error(recovery.length ? `${error.message}（${recovery.join('；')}）` : error.message);
+    } finally {
+      if (suppression) this.renameSuppressions.delete(suppression);
+    }
+
+    // The file is where it belongs now; nothing below may fail the rename itself.
+    for (const controller of [...this.embeddedControllers]) {
+      if (controller.boardPath !== plan.fromPath) continue;
+      try {
+        await controller.setBoardPath(plan.toPath);
+      } catch (error) {
+        console.error('知识画板：重命名后未能更新嵌入画板', error);
+      }
+    }
+    const bindings = updateReadFlowBindings(this.settings.readFlowBindings, { from: plan.fromPath, to: plan.toPath });
+    if (bindings.changed) this.settings.readFlowBindings = bindings.bindings;
+    if (this.settings.lastBoardPath === plan.fromPath) await this.setLastBoardPath(plan.toPath);
+    else await this.saveSettings();
+    return { path: plan.toPath, name: plan.name, board: nextBoard, folderMoved };
+  }
+
+  /**
+   * Markdown that lived in the renamed folder keeps its identity only through the paths other
+   * boards store, so they follow the move instead of turning into missing cards. Open views
+   * and embedded surfaces are skipped: they own their writer and receive the Vault's own
+   * rename events.
+   */
+  async repointBoardsForFolder({ from, to }, exceptPath) {
+    const openInViews = new Set();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_KNOWLEDGE_CANVAS)) {
+      if (leaf.view?.boardPath) openInViews.add(leaf.view.boardPath);
+    }
+    for (const controller of this.embeddedControllers) openInViews.add(controller.boardPath);
+
+    const failures = [];
+    for (const board of this.listMaintainedBoards()) {
+      if (board.path === exceptPath || openInViews.has(board.path) || !this.isCanvasFile(board.path)) continue;
+      try {
+        const data = await this.boardStore.load(board.path);
+        const updated = rewriteFolderReferences(data, from, to);
+        if (updated !== data) await this.boardStore.save(board.path, updated);
+      } catch (error) {
+        failures.push(`${board.path}：${error.message}`);
+      }
+    }
+    if (failures.length) new Notice(`部分画布未能更新文件路径：${failures.join('；')}`);
+  }
+
+  /**
+   * Trashes a managed board and, when the caller proved it safe, its note folder. The canvas
+   * goes first: a folder failure must not leave the user with deleted notes and a live board.
+   * A live embedded surface on that board is torn down first, or its next save would
+   * recreate the file this method just deleted.
+   */
+  async deleteBoard(path, { deleteNoteFolder = null } = {}) {
+    const manage = canManageBoard(path);
+    if (!manage.allowed) throw new Error(manage.reason);
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file?.stat) throw new Error('画布不存在');
+
+    for (const controller of [...this.embeddedControllers]) {
+      if (controller.boardPath !== path) continue;
+      try {
+        await controller.destroy();
+      } catch (error) {
+        throw new Error(`嵌入画板仍有未保存内容，已取消删除：${error.message}`);
+      }
+    }
+
+    await this.app.fileManager.trashFile(file);
+
+    let folder = null;
+    if (deleteNoteFolder) {
+      const target = this.app.vault.getAbstractFileByPath(deleteNoteFolder);
+      if (target) {
+        try {
+          await this.app.fileManager.trashFile(target);
+          folder = { path: deleteNoteFolder, ok: true };
+        } catch (error) {
+          folder = { path: deleteNoteFolder, ok: false, reason: error.message };
+        }
+      }
+    }
+
+    const bindings = updateReadFlowBindings(this.settings.readFlowBindings, { from: path, to: null });
+    if (bindings.changed) this.settings.readFlowBindings = bindings.bindings;
+    // Deleting a board always leaves the next open on the default board, which is recreated
+    // here when it is missing: the view must never be pointed at a path it cannot load.
+    await this.setLastBoardPath(DEFAULT_BOARD_PATH);
+    await this.ensureBoard();
+
+    const parts = ['画布已删除'];
+    if (folder?.ok) parts.push(`专属笔记文件夹已删除：${folder.path}`);
+    if (folder && !folder.ok) parts.push(`专属笔记文件夹未能删除：${folder.path}（${folder.reason}）`);
+    return { path, folder, message: parts.join('；') };
   }
 
   async setLastBoardPath(path) {
@@ -344,11 +534,14 @@ export default class KnowledgeCanvasPlugin extends Plugin {
    */
   async onFileRename(file, oldPath) {
     if (!oldPath.toLowerCase().endsWith('.md') || !file.path.toLowerCase().endsWith('.md')) return;
+    const suppressed = (view) => [...this.renameSuppressions]
+      .some((entry) => entry.view === view && isInsideFolderPath(oldPath, entry.folder));
     const failures = [];
     const openInViews = new Set();
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_KNOWLEDGE_CANVAS)) {
       const view = leaf.view;
       openInViews.add(view.boardPath);
+      if (suppressed(view)) continue;
       try { await view.handleRename(file, oldPath); }
       catch (error) { failures.push(`${view.boardPath}：${error.message}`); }
     }

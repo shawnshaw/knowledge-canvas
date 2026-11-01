@@ -22,7 +22,7 @@ __export(main_exports, {
   default: () => KnowledgeCanvasPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/board-catalog.js
 var DEFAULT_BOARD_PATH = "Canvas/\u77E5\u8BC6\u753B\u677F.canvas";
@@ -70,6 +70,454 @@ function listReadFlowBoards(paths) {
 }
 function isAllowedBoardPath(path) {
   return path === DEFAULT_BOARD_PATH || isManagedBoardPath(path);
+}
+
+// src/board-import.js
+var IMPORT_CARD = Object.freeze({ width: 320, height: 220 });
+var IMPORT_GAP = 24;
+function isMarkdownPath(path) {
+  return /\.md$/i.test(String(path != null ? path : "").trim());
+}
+function isInsideFolder(path, folderPath) {
+  const root = String(folderPath != null ? folderPath : "").replace(/^\/+|\/+$/g, "");
+  const value = String(path != null ? path : "");
+  return !root || value.startsWith(`${root}/`);
+}
+function planImport(paths, existingPaths) {
+  const existing = new Set(existingPaths != null ? existingPaths : []);
+  const seen = /* @__PURE__ */ new Set();
+  const duplicates = [];
+  const added = [];
+  const skippedExisting = [];
+  const skippedInvalid = [];
+  for (const raw of paths != null ? paths : []) {
+    const path = String(raw != null ? raw : "").trim();
+    if (!isMarkdownPath(path)) {
+      skippedInvalid.push(path);
+      continue;
+    }
+    if (seen.has(path)) {
+      duplicates.push(path);
+      continue;
+    }
+    seen.add(path);
+    if (existing.has(path)) skippedExisting.push(path);
+    else added.push(path);
+  }
+  return { added, skippedExisting, skippedInvalid, duplicates };
+}
+function contentRightTop(nodes) {
+  let right = -Infinity;
+  let top = Infinity;
+  for (const node of nodes != null ? nodes : []) {
+    right = Math.max(right, node.x + node.width);
+    top = Math.min(top, node.y);
+  }
+  return (nodes == null ? void 0 : nodes.length) ? { right, top } : null;
+}
+function layoutImportedCards(paths, existingNodes = [], { size = IMPORT_CARD, gap = IMPORT_GAP } = {}) {
+  const ordered = [...paths != null ? paths : []].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  if (!ordered.length) return [];
+  const bounds2 = contentRightTop(existingNodes);
+  const baseX = bounds2 ? bounds2.right + gap : 0;
+  const baseY = bounds2 ? bounds2.top : 0;
+  const columns = Math.ceil(Math.sqrt(ordered.length));
+  return ordered.map((path, index) => ({
+    path,
+    point: {
+      x: baseX + index % columns * (size.width + gap),
+      y: baseY + Math.floor(index / columns) * (size.height + gap)
+    }
+  }));
+}
+
+// src/excerpt-anchor.js
+var EXCERPT_VERSION = 1;
+var EXCERPT_CONTEXT = 32;
+var MARKDOWN_PATH = /\.md$/i;
+function markdownReference(value) {
+  if (typeof value !== "string") return null;
+  const path = value.trim();
+  return MARKDOWN_PATH.test(path) ? path : null;
+}
+function excerptSourcePath(anchor) {
+  return markdownReference(anchor == null ? void 0 : anchor.sourceFile);
+}
+function slice(source, from, to) {
+  return String(source).slice(Math.max(0, from), Math.max(0, to));
+}
+function createExcerptAnchor({ source, start, end, sourceFile, now = () => /* @__PURE__ */ new Date() }) {
+  const text = String(source != null ? source : "");
+  const from = Math.max(0, Math.min(Number(start) || 0, Number(end) || 0));
+  const to = Math.min(text.length, Math.max(Number(start) || 0, Number(end) || 0));
+  const quote = text.slice(from, to);
+  if (!quote.trim()) return null;
+  const stamp = typeof now === "function" ? now() : now;
+  return {
+    version: EXCERPT_VERSION,
+    sourceFile: String(sourceFile != null ? sourceFile : ""),
+    quote,
+    start: from,
+    end: to,
+    prefix: slice(text, from - EXCERPT_CONTEXT, from),
+    suffix: slice(text, to, to + EXCERPT_CONTEXT),
+    createdAt: stamp instanceof Date ? stamp.toISOString() : new Date(stamp).toISOString()
+  };
+}
+function isIsoTimestamp(value) {
+  return typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value));
+}
+function validateExcerptAnchor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "\u6458\u5F55\u5143\u6570\u636E\u4E0D\u662F\u5BF9\u8C61";
+  if (value.version !== EXCERPT_VERSION) return `\u4E0D\u652F\u6301\u7684\u6458\u5F55\u7248\u672C\uFF1A${String(value.version)}`;
+  if (!excerptSourcePath(value)) return "\u6458\u5F55\u7684 sourceFile \u5FC5\u987B\u662F Markdown \u8DEF\u5F84";
+  if (typeof value.quote !== "string" || !value.quote.trim()) return "\u6458\u5F55\u7F3A\u5C11 quote";
+  if (!Number.isInteger(value.start) || !Number.isInteger(value.end) || value.start < 0 || value.end < value.start) {
+    return "\u6458\u5F55\u7684 start/end \u4E0D\u5408\u6CD5";
+  }
+  if (typeof value.prefix !== "string" || typeof value.suffix !== "string") return "\u6458\u5F55\u7684 prefix/suffix \u4E0D\u5408\u6CD5";
+  if (value.createdAt !== void 0 && !isIsoTimestamp(value.createdAt)) return "\u6458\u5F55\u7684 createdAt \u4E0D\u662F\u5408\u6CD5\u65F6\u95F4";
+  if (value.updatedAt !== void 0 && !isIsoTimestamp(value.updatedAt)) return "\u6458\u5F55\u7684 updatedAt \u4E0D\u662F\u5408\u6CD5\u65F6\u95F4";
+  return null;
+}
+function formatLocalTimestamp(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
+}
+function staleExcerptIds(nodes, sourceFile, content) {
+  const ids = [];
+  for (const node of nodes != null ? nodes : []) {
+    const anchor = node == null ? void 0 : node.kcExcerpt;
+    if (!anchor || anchor.sourceFile !== sourceFile) continue;
+    if (!locateExcerpt(content, anchor).found) ids.push(node.id);
+  }
+  return ids;
+}
+function markExcerptsUpdated(nodes, ids, updatedAt) {
+  const target = ids instanceof Set ? ids : new Set(ids != null ? ids : []);
+  let changed = 0;
+  for (const node of nodes != null ? nodes : []) {
+    if (!target.has(node == null ? void 0 : node.id) || !node.kcExcerpt) continue;
+    node.kcExcerpt = { ...node.kcExcerpt, updatedAt };
+    changed += 1;
+  }
+  return changed;
+}
+function occurrencesOf(text, quote) {
+  const matches = [];
+  let index = text.indexOf(quote);
+  while (index !== -1) {
+    matches.push(index);
+    index = text.indexOf(quote, index + 1);
+  }
+  return matches;
+}
+function contextScore(text, at, quote, prefix, suffix) {
+  let score = 0;
+  if (prefix && at >= prefix.length && text.slice(at - prefix.length, at) === prefix) score += 1;
+  if (suffix && text.slice(at + quote.length, at + quote.length + suffix.length) === suffix) score += 1;
+  return score;
+}
+function locateExcerpt(source, anchor) {
+  const text = String(source != null ? source : "");
+  const quote = typeof (anchor == null ? void 0 : anchor.quote) === "string" ? anchor.quote : "";
+  if (!quote) return { found: false, strategy: "none" };
+  const { start, end } = anchor;
+  if (Number.isInteger(start) && Number.isInteger(end) && end > start && text.slice(start, end) === quote) {
+    return { found: true, start, end, strategy: "offsets" };
+  }
+  const matches = occurrencesOf(text, quote);
+  if (!matches.length) return { found: false, strategy: "none" };
+  if (matches.length === 1) {
+    return { found: true, start: matches[0], end: matches[0] + quote.length, strategy: "unique" };
+  }
+  const prefix = typeof anchor.prefix === "string" ? anchor.prefix : "";
+  const suffix = typeof anchor.suffix === "string" ? anchor.suffix : "";
+  let best = matches[0];
+  let bestScore = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const at of matches) {
+    const score = contextScore(text, at, quote, prefix, suffix);
+    const distance2 = Number.isInteger(start) ? Math.abs(at - start) : 0;
+    if (score > bestScore || score === bestScore && distance2 < bestDistance) {
+      best = at;
+      bestScore = score;
+      bestDistance = distance2;
+    }
+  }
+  if (bestScore <= 0) return { found: false, strategy: "none" };
+  return { found: true, start: best, end: best + quote.length, strategy: "context" };
+}
+function excerptTextFromQuote(quote) {
+  return String(quote != null ? quote : "").split("\n").map((line) => `> ${line.trim()}`.trimEnd()).join("\n");
+}
+
+// src/delete-plan.js
+function nodeFileReferences(node) {
+  var _a;
+  if (!node || typeof node !== "object") return [];
+  const id = typeof node.id === "string" ? node.id : "";
+  const paths = /* @__PURE__ */ new Set();
+  for (const value of [node.file, (_a = node.kcExcerpt) == null ? void 0 : _a.sourceFile]) {
+    const path = markdownReference(value);
+    if (path) paths.add(path);
+  }
+  return [...paths].map((file) => ({ id, file }));
+}
+function documentNodes(document2) {
+  var _a;
+  if (Array.isArray((_a = document2 == null ? void 0 : document2.board) == null ? void 0 : _a.nodes)) return document2.board.nodes;
+  if (Array.isArray(document2 == null ? void 0 : document2.nodes)) return document2.nodes;
+  return null;
+}
+function extractCanvasFileReferences(raw) {
+  let document2;
+  try {
+    document2 = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (e) {
+    throw new Error("\u753B\u5E03\u65E0\u6CD5\u89E3\u6790");
+  }
+  if (!document2 || !Array.isArray(document2.nodes)) throw new Error("\u753B\u5E03\u65E0\u6CD5\u89E3\u6790");
+  return document2.nodes.flatMap(nodeFileReferences);
+}
+function classifySelection(board, selectedIds) {
+  const nodeIds = board.nodes.filter((node) => selectedIds.has(node.id)).map((node) => node.id);
+  const edgeIds = board.edges.filter((edge) => selectedIds.has(edge.id)).map((edge) => edge.id);
+  return { nodeIds, edgeIds };
+}
+function analyzeDelete(board, selectedIds, canvasDocuments = [], { isMissing = () => false, currentPath = "" } = {}) {
+  var _a, _b;
+  const { nodeIds, edgeIds } = classifySelection(board, selectedIds);
+  const removedIds = new Set(nodeIds);
+  const selected = board.nodes.filter((node) => removedIds.has(node.id));
+  const filePaths = [...new Set(selected.map((node) => node.file).filter((file) => typeof file === "string"))];
+  const uncertain = [];
+  const references = /* @__PURE__ */ new Map();
+  for (const document2 of canvasDocuments != null ? canvasDocuments : []) {
+    if (document2 == null ? void 0 : document2.error) {
+      uncertain.push({ path: document2.path, reason: String((_a = document2.error.message) != null ? _a : document2.error) });
+      continue;
+    }
+    const nodes = documentNodes(document2);
+    if (!nodes) {
+      uncertain.push({ path: document2.path, reason: "\u753B\u5E03\u65E0\u6CD5\u89E3\u6790" });
+      continue;
+    }
+    const isCurrentCanvas = document2.board === board || currentPath !== "" && document2.path === currentPath;
+    for (const node of nodes) {
+      for (const reference of nodeFileReferences(node)) {
+        if (isCurrentCanvas && removedIds.has(reference.id)) continue;
+        if (!references.has(reference.file)) references.set(reference.file, /* @__PURE__ */ new Set());
+        references.get(reference.file).add(document2.path);
+      }
+    }
+  }
+  const blockedTrash = [];
+  const missingPaths = [];
+  for (const path of filePaths) {
+    if (isMissing(path)) {
+      missingPaths.push(path);
+      continue;
+    }
+    const refs = [...(_b = references.get(path)) != null ? _b : []].sort();
+    if (refs.length) blockedTrash.push({ path, references: refs });
+  }
+  return { nodeIds, edgeIds, filePaths, blockedTrash, missingPaths, uncertain };
+}
+function planTrashTargets(plan) {
+  const missing = new Set(plan.missingPaths);
+  const paths = plan.filePaths.filter((path) => !missing.has(path));
+  const reasons = [];
+  if (plan.uncertain.length) {
+    reasons.push(`\u6709\u753B\u5E03\u65E0\u6CD5\u8BFB\u53D6\u6216\u89E3\u6790\uFF1A${plan.uncertain.map((item) => item.path).join("\u3001")}`);
+  }
+  if (plan.blockedTrash.length) {
+    reasons.push(`\u6E90\u6587\u4EF6\u4ECD\u88AB\u5176\u4ED6\u5361\u7247\u6216\u753B\u5E03\u5F15\u7528\uFF1A${plan.blockedTrash.map((item) => `${item.path}\uFF08${item.references.join("\u3001")}\uFF09`).join("\uFF1B")}`);
+  }
+  if (!paths.length && !reasons.length) reasons.push("\u6CA1\u6709\u53EF\u79FB\u5165\u5E9F\u7EB8\u7BD3\u7684\u6E90\u6587\u4EF6");
+  return { paths, disabled: reasons.length > 0, reason: reasons.join("\uFF1B") };
+}
+var DELETE_LIST_LIMIT = 5;
+function revalidateTrashTargets(paths, canvasDocuments = []) {
+  var _a, _b;
+  const targets = [...new Set(paths != null ? paths : [])];
+  const references = /* @__PURE__ */ new Map();
+  const uncertain = [];
+  for (const document2 of canvasDocuments != null ? canvasDocuments : []) {
+    if (document2 == null ? void 0 : document2.error) {
+      uncertain.push({ path: document2.path, reason: String((_a = document2.error.message) != null ? _a : document2.error) });
+      continue;
+    }
+    const nodes = documentNodes(document2);
+    if (!nodes) {
+      uncertain.push({ path: document2.path, reason: "\u753B\u5E03\u65E0\u6CD5\u89E3\u6790" });
+      continue;
+    }
+    for (const node of nodes) {
+      for (const reference of nodeFileReferences(node)) {
+        if (!references.has(reference.file)) references.set(reference.file, /* @__PURE__ */ new Set());
+        references.get(reference.file).add(document2.path);
+      }
+    }
+  }
+  const allowed = [];
+  const blocked = [];
+  for (const path of targets) {
+    const refs = [...(_b = references.get(path)) != null ? _b : []].sort();
+    if (refs.length) blocked.push({ path, references: refs, reason: "referenced" });
+    else if (uncertain.length) blocked.push({ path, references: uncertain.map((item) => item.path), reason: "uncertain" });
+    else allowed.push(path);
+  }
+  return { allowed, blocked, uncertain };
+}
+function listRemovalTargets(plan, limit = DELETE_LIST_LIMIT) {
+  const names = plan.filePaths.slice(0, limit);
+  return { names, extra: Math.max(0, plan.filePaths.length - names.length) };
+}
+function summarizeTrash(results) {
+  const deleted = results.filter((result) => result.ok).map((result) => result.path);
+  const failed = results.filter((result) => !result.ok).map((result) => {
+    var _a;
+    return { path: result.path, reason: String((_a = result.reason) != null ? _a : "") };
+  });
+  const parts = [];
+  if (deleted.length) parts.push(`\u6E90\u6587\u4EF6\u5DF2\u79FB\u5165\u5E9F\u7EB8\u7BD3\uFF1A${deleted.join("\u3001")}`);
+  if (failed.length) parts.push(`\u672A\u80FD\u79FB\u5165\u5E9F\u7EB8\u7BD3\uFF1A${failed.map((item) => `${item.path}\uFF08${item.reason}\uFF09`).join("\uFF1B")}`);
+  return { deleted, failed, message: parts.join("\uFF1B") };
+}
+
+// src/board-management.js
+var BOARD_EXTENSION2 = ".canvas";
+var FOLDER_LIST_LIMIT = 5;
+function boardNameFromPath2(path) {
+  var _a;
+  const file = (_a = String(path != null ? path : "").split("/").at(-1)) != null ? _a : "";
+  return file.replace(/\.canvas$/i, "");
+}
+function canManageBoard(path) {
+  const value = String(path != null ? path : "");
+  if (!value) return { allowed: false, reason: "\u6CA1\u6709\u53EF\u7BA1\u7406\u7684\u753B\u5E03" };
+  if (value === DEFAULT_BOARD_PATH) return { allowed: false, reason: "\u9ED8\u8BA4\u753B\u5E03\u4E0D\u80FD\u91CD\u547D\u540D\u6216\u5220\u9664" };
+  if (isReadFlowBoardPath(value)) return { allowed: false, reason: "ReadFlow \u4E66\u677F\u7531 ReadFlow \u7BA1\u7406" };
+  if (!value.startsWith(`${BOARD_FOLDER}/`)) return { allowed: false, reason: `\u53EA\u6709 ${BOARD_FOLDER} \u4E0B\u7684\u753B\u5E03\u53EF\u4EE5\u91CD\u547D\u540D\u6216\u5220\u9664` };
+  if (!value.toLowerCase().endsWith(BOARD_EXTENSION2)) return { allowed: false, reason: "\u76EE\u6807\u4E0D\u662F\u753B\u5E03\u6587\u4EF6" };
+  return { allowed: true, reason: "" };
+}
+function joinSegments(segments) {
+  return segments.filter((segment) => segment !== "").join("/");
+}
+function stripSlashes(value) {
+  return String(value != null ? value : "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+function renameBoardNoteFolder(noteFolder, name) {
+  const folder = stripSlashes(noteFolder);
+  if (!folder) return null;
+  const segments = folder.split("/");
+  return joinSegments([...segments.slice(0, -1), normalizeBoardName(name)]);
+}
+function isInsideFolderPath(path, folder) {
+  const root = stripSlashes(folder);
+  return Boolean(root) && String(path != null ? path : "").startsWith(`${root}/`);
+}
+function replaceFolderPrefix(path, from, to) {
+  return `${stripSlashes(to)}/${String(path).slice(stripSlashes(from).length + 1)}`;
+}
+function planBoardRename({ path, name, existingPaths = [], folderPaths = [], noteFolder = null, renameNoteFolder = false } = {}) {
+  const manage = canManageBoard(path);
+  if (!manage.allowed) throw new Error(manage.reason);
+  let nextName;
+  try {
+    nextName = normalizeBoardName(name);
+  } catch (e) {
+    throw new Error("\u753B\u5E03\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A\uFF0C\u4E5F\u4E0D\u80FD\u5305\u542B . \u6216 .. \u8DEF\u5F84\u7247\u6BB5");
+  }
+  const toPath = `${BOARD_FOLDER}/${nextName}${BOARD_EXTENSION2}`;
+  if (toPath === path) throw new Error("\u753B\u5E03\u540D\u79F0\u6CA1\u6709\u53D8\u5316");
+  if ((existingPaths != null ? existingPaths : []).includes(toPath)) throw new Error(`\u753B\u5E03\u5DF2\u5B58\u5728\uFF1A${toPath}`);
+  let folderPlan = null;
+  if (noteFolder && renameNoteFolder) {
+    const to = renameBoardNoteFolder(noteFolder, nextName);
+    if (to && to !== stripSlashes(noteFolder)) {
+      if ((folderPaths != null ? folderPaths : []).some((folder) => stripSlashes(folder) === to)) {
+        throw new Error(`\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\u5DF2\u5B58\u5728\uFF1A${to}`);
+      }
+      folderPlan = { from: stripSlashes(noteFolder), to };
+    }
+  }
+  return { name: nextName, fromPath: path, toPath, noteFolder: folderPlan };
+}
+function rewriteFolderReferences(board, from, to) {
+  if (!board || !from || !to || stripSlashes(from) === stripSlashes(to)) return board;
+  let changed = false;
+  const nodes = board.nodes.map((node) => {
+    const copy = { ...node };
+    if (typeof copy.file === "string" && isInsideFolderPath(copy.file, from)) {
+      copy.file = replaceFolderPrefix(copy.file, from, to);
+      changed = true;
+    }
+    if (copy.kcExcerpt && typeof copy.kcExcerpt.sourceFile === "string" && isInsideFolderPath(copy.kcExcerpt.sourceFile, from)) {
+      copy.kcExcerpt = { ...copy.kcExcerpt, sourceFile: replaceFolderPrefix(copy.kcExcerpt.sourceFile, from, to) };
+      changed = true;
+    }
+    return copy;
+  });
+  return changed ? { ...board, nodes } : board;
+}
+function applyBoardRename(board, plan) {
+  var _a;
+  if (!board) return board;
+  let next = board;
+  if (plan == null ? void 0 : plan.noteFolder) {
+    if (((_a = board.kcMeta) == null ? void 0 : _a.noteFolder) === plan.noteFolder.from) {
+      next = { ...next, kcMeta: { ...board.kcMeta, noteFolder: plan.noteFolder.to } };
+    }
+    next = rewriteFolderReferences(next, plan.noteFolder.from, plan.noteFolder.to);
+  }
+  return next;
+}
+function listPaths(paths, limit = FOLDER_LIST_LIMIT) {
+  const names = paths.slice(0, limit).map((path) => path.split("/").at(-1));
+  const extra = paths.length - names.length;
+  return extra > 0 ? `${names.join("\u3001")} \u7B49 ${paths.length} \u9879` : names.join("\u3001");
+}
+function analyzeBoardNoteFolder({ folderPath, files = [], folders = [], board } = {}) {
+  var _a;
+  const folder = stripSlashes(folderPath);
+  if (!folder) return { deletable: false, reason: "\u8BE5\u753B\u5E03\u6CA1\u6709\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939", fileCount: 0 };
+  const subfolders = folders.map((item) => typeof item === "string" ? item : item == null ? void 0 : item.path).filter((path) => typeof path === "string" && path !== folder && path.startsWith(`${folder}/`));
+  const inside = files.map((item) => typeof item === "string" ? item : item == null ? void 0 : item.path).filter((path) => typeof path === "string" && path.startsWith(`${folder}/`));
+  const referenced = /* @__PURE__ */ new Set();
+  for (const node of (_a = board == null ? void 0 : board.nodes) != null ? _a : []) {
+    for (const reference of nodeFileReferences(node)) referenced.add(reference.file);
+  }
+  const foreign = inside.filter((path) => !isMarkdownPath(path));
+  const unreferenced = inside.filter((path) => isMarkdownPath(path) && !referenced.has(path));
+  const reasons = [];
+  if (subfolders.length) reasons.push(`\u5305\u542B\u5B50\u6587\u4EF6\u5939\uFF1A${listPaths(subfolders)}`);
+  if (foreign.length) reasons.push(`\u5305\u542B\u975E Markdown \u6587\u4EF6\uFF1A${listPaths(foreign)}`);
+  if (unreferenced.length) reasons.push(`\u6709 Markdown \u672A\u88AB\u5F53\u524D\u753B\u5E03\u5F15\u7528\uFF1A${listPaths(unreferenced)}`);
+  return {
+    deletable: reasons.length === 0,
+    reason: reasons.join("\uFF1B"),
+    fileCount: inside.length,
+    subfolders,
+    foreign,
+    unreferenced
+  };
+}
+function updateReadFlowBindings(bindings, { from, to = null } = {}) {
+  const next = {};
+  let changed = false;
+  for (const [bookId, path] of Object.entries(bindings != null ? bindings : {})) {
+    if (path !== from) {
+      next[bookId] = path;
+      continue;
+    }
+    changed = true;
+    if (to) next[bookId] = to;
+  }
+  return { bindings: next, changed };
 }
 
 // src/card-colors.js
@@ -429,128 +877,6 @@ function edgePath(from, to, route, obstacles, labelSize) {
   return { d: built.d, labelPoint: built.labelPoint };
 }
 
-// src/excerpt-anchor.js
-var EXCERPT_VERSION = 1;
-var EXCERPT_CONTEXT = 32;
-var MARKDOWN_PATH = /\.md$/i;
-function markdownReference(value) {
-  if (typeof value !== "string") return null;
-  const path = value.trim();
-  return MARKDOWN_PATH.test(path) ? path : null;
-}
-function excerptSourcePath(anchor) {
-  return markdownReference(anchor == null ? void 0 : anchor.sourceFile);
-}
-function slice(source, from, to) {
-  return String(source).slice(Math.max(0, from), Math.max(0, to));
-}
-function createExcerptAnchor({ source, start, end, sourceFile, now = () => /* @__PURE__ */ new Date() }) {
-  const text = String(source != null ? source : "");
-  const from = Math.max(0, Math.min(Number(start) || 0, Number(end) || 0));
-  const to = Math.min(text.length, Math.max(Number(start) || 0, Number(end) || 0));
-  const quote = text.slice(from, to);
-  if (!quote.trim()) return null;
-  const stamp = typeof now === "function" ? now() : now;
-  return {
-    version: EXCERPT_VERSION,
-    sourceFile: String(sourceFile != null ? sourceFile : ""),
-    quote,
-    start: from,
-    end: to,
-    prefix: slice(text, from - EXCERPT_CONTEXT, from),
-    suffix: slice(text, to, to + EXCERPT_CONTEXT),
-    createdAt: stamp instanceof Date ? stamp.toISOString() : new Date(stamp).toISOString()
-  };
-}
-function isIsoTimestamp(value) {
-  return typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value));
-}
-function validateExcerptAnchor(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "\u6458\u5F55\u5143\u6570\u636E\u4E0D\u662F\u5BF9\u8C61";
-  if (value.version !== EXCERPT_VERSION) return `\u4E0D\u652F\u6301\u7684\u6458\u5F55\u7248\u672C\uFF1A${String(value.version)}`;
-  if (!excerptSourcePath(value)) return "\u6458\u5F55\u7684 sourceFile \u5FC5\u987B\u662F Markdown \u8DEF\u5F84";
-  if (typeof value.quote !== "string" || !value.quote.trim()) return "\u6458\u5F55\u7F3A\u5C11 quote";
-  if (!Number.isInteger(value.start) || !Number.isInteger(value.end) || value.start < 0 || value.end < value.start) {
-    return "\u6458\u5F55\u7684 start/end \u4E0D\u5408\u6CD5";
-  }
-  if (typeof value.prefix !== "string" || typeof value.suffix !== "string") return "\u6458\u5F55\u7684 prefix/suffix \u4E0D\u5408\u6CD5";
-  if (value.createdAt !== void 0 && !isIsoTimestamp(value.createdAt)) return "\u6458\u5F55\u7684 createdAt \u4E0D\u662F\u5408\u6CD5\u65F6\u95F4";
-  if (value.updatedAt !== void 0 && !isIsoTimestamp(value.updatedAt)) return "\u6458\u5F55\u7684 updatedAt \u4E0D\u662F\u5408\u6CD5\u65F6\u95F4";
-  return null;
-}
-function formatLocalTimestamp(iso) {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString();
-}
-function staleExcerptIds(nodes, sourceFile, content) {
-  const ids = [];
-  for (const node of nodes != null ? nodes : []) {
-    const anchor = node == null ? void 0 : node.kcExcerpt;
-    if (!anchor || anchor.sourceFile !== sourceFile) continue;
-    if (!locateExcerpt(content, anchor).found) ids.push(node.id);
-  }
-  return ids;
-}
-function markExcerptsUpdated(nodes, ids, updatedAt) {
-  const target = ids instanceof Set ? ids : new Set(ids != null ? ids : []);
-  let changed = 0;
-  for (const node of nodes != null ? nodes : []) {
-    if (!target.has(node == null ? void 0 : node.id) || !node.kcExcerpt) continue;
-    node.kcExcerpt = { ...node.kcExcerpt, updatedAt };
-    changed += 1;
-  }
-  return changed;
-}
-function occurrencesOf(text, quote) {
-  const matches = [];
-  let index = text.indexOf(quote);
-  while (index !== -1) {
-    matches.push(index);
-    index = text.indexOf(quote, index + 1);
-  }
-  return matches;
-}
-function contextScore(text, at, quote, prefix, suffix) {
-  let score = 0;
-  if (prefix && at >= prefix.length && text.slice(at - prefix.length, at) === prefix) score += 1;
-  if (suffix && text.slice(at + quote.length, at + quote.length + suffix.length) === suffix) score += 1;
-  return score;
-}
-function locateExcerpt(source, anchor) {
-  const text = String(source != null ? source : "");
-  const quote = typeof (anchor == null ? void 0 : anchor.quote) === "string" ? anchor.quote : "";
-  if (!quote) return { found: false, strategy: "none" };
-  const { start, end } = anchor;
-  if (Number.isInteger(start) && Number.isInteger(end) && end > start && text.slice(start, end) === quote) {
-    return { found: true, start, end, strategy: "offsets" };
-  }
-  const matches = occurrencesOf(text, quote);
-  if (!matches.length) return { found: false, strategy: "none" };
-  if (matches.length === 1) {
-    return { found: true, start: matches[0], end: matches[0] + quote.length, strategy: "unique" };
-  }
-  const prefix = typeof anchor.prefix === "string" ? anchor.prefix : "";
-  const suffix = typeof anchor.suffix === "string" ? anchor.suffix : "";
-  let best = matches[0];
-  let bestScore = -1;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const at of matches) {
-    const score = contextScore(text, at, quote, prefix, suffix);
-    const distance2 = Number.isInteger(start) ? Math.abs(at - start) : 0;
-    if (score > bestScore || score === bestScore && distance2 < bestDistance) {
-      best = at;
-      bestScore = score;
-      bestDistance = distance2;
-    }
-  }
-  if (bestScore <= 0) return { found: false, strategy: "none" };
-  return { found: true, start: best, end: best + quote.length, strategy: "context" };
-}
-function excerptTextFromQuote(quote) {
-  return String(quote != null ? quote : "").split("\n").map((line) => `> ${line.trim()}`.trimEnd()).join("\n");
-}
-
 // src/board-model.js
 var DEFAULT_SIZE = Object.freeze({ width: 320, height: 220 });
 var EDGE_ENDS = /* @__PURE__ */ new Set(["none", "arrow"]);
@@ -859,140 +1185,6 @@ var BoardStore = class {
   }
 };
 
-// src/delete-plan.js
-function nodeFileReferences(node) {
-  var _a;
-  if (!node || typeof node !== "object") return [];
-  const id = typeof node.id === "string" ? node.id : "";
-  const paths = /* @__PURE__ */ new Set();
-  for (const value of [node.file, (_a = node.kcExcerpt) == null ? void 0 : _a.sourceFile]) {
-    const path = markdownReference(value);
-    if (path) paths.add(path);
-  }
-  return [...paths].map((file) => ({ id, file }));
-}
-function documentNodes(document2) {
-  var _a;
-  if (Array.isArray((_a = document2 == null ? void 0 : document2.board) == null ? void 0 : _a.nodes)) return document2.board.nodes;
-  if (Array.isArray(document2 == null ? void 0 : document2.nodes)) return document2.nodes;
-  return null;
-}
-function extractCanvasFileReferences(raw) {
-  let document2;
-  try {
-    document2 = typeof raw === "string" ? JSON.parse(raw) : raw;
-  } catch (e) {
-    throw new Error("\u753B\u5E03\u65E0\u6CD5\u89E3\u6790");
-  }
-  if (!document2 || !Array.isArray(document2.nodes)) throw new Error("\u753B\u5E03\u65E0\u6CD5\u89E3\u6790");
-  return document2.nodes.flatMap(nodeFileReferences);
-}
-function classifySelection(board, selectedIds) {
-  const nodeIds = board.nodes.filter((node) => selectedIds.has(node.id)).map((node) => node.id);
-  const edgeIds = board.edges.filter((edge) => selectedIds.has(edge.id)).map((edge) => edge.id);
-  return { nodeIds, edgeIds };
-}
-function analyzeDelete(board, selectedIds, canvasDocuments = [], { isMissing = () => false, currentPath = "" } = {}) {
-  var _a, _b;
-  const { nodeIds, edgeIds } = classifySelection(board, selectedIds);
-  const removedIds = new Set(nodeIds);
-  const selected = board.nodes.filter((node) => removedIds.has(node.id));
-  const filePaths = [...new Set(selected.map((node) => node.file).filter((file) => typeof file === "string"))];
-  const uncertain = [];
-  const references = /* @__PURE__ */ new Map();
-  for (const document2 of canvasDocuments != null ? canvasDocuments : []) {
-    if (document2 == null ? void 0 : document2.error) {
-      uncertain.push({ path: document2.path, reason: String((_a = document2.error.message) != null ? _a : document2.error) });
-      continue;
-    }
-    const nodes = documentNodes(document2);
-    if (!nodes) {
-      uncertain.push({ path: document2.path, reason: "\u753B\u5E03\u65E0\u6CD5\u89E3\u6790" });
-      continue;
-    }
-    const isCurrentCanvas = document2.board === board || currentPath !== "" && document2.path === currentPath;
-    for (const node of nodes) {
-      for (const reference of nodeFileReferences(node)) {
-        if (isCurrentCanvas && removedIds.has(reference.id)) continue;
-        if (!references.has(reference.file)) references.set(reference.file, /* @__PURE__ */ new Set());
-        references.get(reference.file).add(document2.path);
-      }
-    }
-  }
-  const blockedTrash = [];
-  const missingPaths = [];
-  for (const path of filePaths) {
-    if (isMissing(path)) {
-      missingPaths.push(path);
-      continue;
-    }
-    const refs = [...(_b = references.get(path)) != null ? _b : []].sort();
-    if (refs.length) blockedTrash.push({ path, references: refs });
-  }
-  return { nodeIds, edgeIds, filePaths, blockedTrash, missingPaths, uncertain };
-}
-function planTrashTargets(plan) {
-  const missing = new Set(plan.missingPaths);
-  const paths = plan.filePaths.filter((path) => !missing.has(path));
-  const reasons = [];
-  if (plan.uncertain.length) {
-    reasons.push(`\u6709\u753B\u5E03\u65E0\u6CD5\u8BFB\u53D6\u6216\u89E3\u6790\uFF1A${plan.uncertain.map((item) => item.path).join("\u3001")}`);
-  }
-  if (plan.blockedTrash.length) {
-    reasons.push(`\u6E90\u6587\u4EF6\u4ECD\u88AB\u5176\u4ED6\u5361\u7247\u6216\u753B\u5E03\u5F15\u7528\uFF1A${plan.blockedTrash.map((item) => `${item.path}\uFF08${item.references.join("\u3001")}\uFF09`).join("\uFF1B")}`);
-  }
-  if (!paths.length && !reasons.length) reasons.push("\u6CA1\u6709\u53EF\u79FB\u5165\u5E9F\u7EB8\u7BD3\u7684\u6E90\u6587\u4EF6");
-  return { paths, disabled: reasons.length > 0, reason: reasons.join("\uFF1B") };
-}
-var DELETE_LIST_LIMIT = 5;
-function revalidateTrashTargets(paths, canvasDocuments = []) {
-  var _a, _b;
-  const targets = [...new Set(paths != null ? paths : [])];
-  const references = /* @__PURE__ */ new Map();
-  const uncertain = [];
-  for (const document2 of canvasDocuments != null ? canvasDocuments : []) {
-    if (document2 == null ? void 0 : document2.error) {
-      uncertain.push({ path: document2.path, reason: String((_a = document2.error.message) != null ? _a : document2.error) });
-      continue;
-    }
-    const nodes = documentNodes(document2);
-    if (!nodes) {
-      uncertain.push({ path: document2.path, reason: "\u753B\u5E03\u65E0\u6CD5\u89E3\u6790" });
-      continue;
-    }
-    for (const node of nodes) {
-      for (const reference of nodeFileReferences(node)) {
-        if (!references.has(reference.file)) references.set(reference.file, /* @__PURE__ */ new Set());
-        references.get(reference.file).add(document2.path);
-      }
-    }
-  }
-  const allowed = [];
-  const blocked = [];
-  for (const path of targets) {
-    const refs = [...(_b = references.get(path)) != null ? _b : []].sort();
-    if (refs.length) blocked.push({ path, references: refs, reason: "referenced" });
-    else if (uncertain.length) blocked.push({ path, references: uncertain.map((item) => item.path), reason: "uncertain" });
-    else allowed.push(path);
-  }
-  return { allowed, blocked, uncertain };
-}
-function listRemovalTargets(plan, limit = DELETE_LIST_LIMIT) {
-  const names = plan.filePaths.slice(0, limit);
-  return { names, extra: Math.max(0, plan.filePaths.length - names.length) };
-}
-function summarizeTrash(results) {
-  const deleted = results.filter((result) => result.ok).map((result) => result.path);
-  const failed = results.filter((result) => !result.ok).map((result) => {
-    var _a;
-    return { path: result.path, reason: String((_a = result.reason) != null ? _a : "") };
-  });
-  const parts = [];
-  if (deleted.length) parts.push(`\u6E90\u6587\u4EF6\u5DF2\u79FB\u5165\u5E9F\u7EB8\u7BD3\uFF1A${deleted.join("\u3001")}`);
-  if (failed.length) parts.push(`\u672A\u80FD\u79FB\u5165\u5E9F\u7EB8\u7BD3\uFF1A${failed.map((item) => `${item.path}\uFF08${item.reason}\uFF09`).join("\uFF1B")}`);
-  return { deleted, failed, message: parts.join("\uFF1B") };
-}
-
 // src/readflow-layout.js
 var READFLOW_CARD = Object.freeze({ width: 320, height: 220 });
 var READFLOW_GAP = 40;
@@ -1157,7 +1349,7 @@ function serializeByKey(queues, key, task) {
 }
 
 // src/knowledge-canvas-view.js
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/card-queries.js
 var LABEL_LIMIT = 40;
@@ -1196,7 +1388,7 @@ function canPromoteToMarkdown(board, edge) {
 
 // src/canvas-tools.js
 var TOOL_ENTRY_BASE_ACTIONS = Object.freeze(["sticky", "importFile", "importFolder", "layout"]);
-var TOPBAR_BOARD_ACTIONS = Object.freeze(["boardSelect", "newBoard", "importReadFlow"]);
+var TOPBAR_BOARD_ACTIONS = Object.freeze(["boardSelect", "newBoard", "importReadFlow", "boardMenu"]);
 function createToolEntryState() {
   return { expanded: false };
 }
@@ -1429,6 +1621,142 @@ function dragBounds(nodes) {
   return { left, top, right, bottom, width: right - left, height: bottom - top };
 }
 
+// src/board-management-modal.js
+var import_obsidian = require("obsidian");
+var nextBoardControlId = 0;
+var RenameBoardModal = class extends import_obsidian.Modal {
+  constructor(app, options, resolve) {
+    super(app);
+    this.options = options;
+    this.resolve = resolve;
+    this.settled = false;
+  }
+  onOpen() {
+    const { currentName, noteFolder, validate } = this.options;
+    this.titleEl.setText("\u91CD\u547D\u540D\u753B\u5E03");
+    const form = this.contentEl.createEl("form", { cls: "kc-input-form" });
+    const group = form.createDiv({ cls: "kc-input-field" });
+    const id = `kc-board-rename-${++nextBoardControlId}`;
+    const label = group.createEl("label", { text: "\u753B\u5E03\u540D\u79F0" });
+    label.htmlFor = id;
+    const input = group.createEl("input");
+    input.id = id;
+    input.type = "text";
+    input.value = currentName != null ? currentName : "";
+    let folderCheckbox = null;
+    if (noteFolder) {
+      const row = form.createDiv({ cls: "kc-input-field kc-input-field--checkbox" });
+      const boxId = `${id}-folder`;
+      folderCheckbox = row.createEl("input");
+      folderCheckbox.id = boxId;
+      folderCheckbox.type = "checkbox";
+      folderCheckbox.checked = false;
+      const boxLabel = row.createEl("label", { text: "\u540C\u65F6\u91CD\u547D\u540D\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939" });
+      boxLabel.htmlFor = boxId;
+      form.createEl("p", { cls: "kc-input-hint", text: `\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\uFF1A${noteFolder}` });
+    }
+    const actions = form.createDiv({ cls: "kc-modal-actions" });
+    const cancel = actions.createEl("button", { text: "\u53D6\u6D88" });
+    cancel.type = "button";
+    cancel.addEventListener("click", () => this.close());
+    const submit = actions.createEl("button", { cls: "mod-cta", text: "\u4FDD\u5B58" });
+    submit.type = "submit";
+    form.addEventListener("submit", (event) => {
+      var _a;
+      event.preventDefault();
+      const values = { name: input.value, renameNoteFolder: (folderCheckbox == null ? void 0 : folderCheckbox.checked) === true };
+      const error = (_a = validate == null ? void 0 : validate(values)) != null ? _a : null;
+      if (error) {
+        new import_obsidian.Notice(error);
+        input.focus();
+        input.select();
+        return;
+      }
+      this.submit(values);
+    });
+    queueMicrotask(() => {
+      input.focus();
+      input.select();
+    });
+  }
+  submit(values) {
+    if (this.settled) return;
+    this.settled = true;
+    this.resolve(values);
+    this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+    if (!this.settled) {
+      this.settled = true;
+      this.resolve(null);
+    }
+  }
+};
+var DeleteBoardModal = class extends import_obsidian.Modal {
+  constructor(app, options, resolve) {
+    super(app);
+    this.options = options;
+    this.resolve = resolve;
+    this.settled = false;
+    this.deleteNoteFolder = false;
+  }
+  onOpen() {
+    const { name, noteFolder, folderDeletable, folderReason } = this.options;
+    this.titleEl.setText(`\u5220\u9664\u753B\u5E03\u300C${name}\u300D\uFF1F`);
+    this.contentEl.createEl("p", { text: "\u753B\u5E03\u6587\u4EF6\u4F1A\u79FB\u5165\u5E9F\u7EB8\u7BD3\uFF0CMarkdown \u7B14\u8BB0\u9ED8\u8BA4\u4FDD\u7559\u3002" });
+    if (noteFolder) {
+      const row = this.contentEl.createDiv({ cls: "kc-delete-option" });
+      const id = `kc-board-delete-folder-${++nextBoardControlId}`;
+      const checkbox = row.createEl("input", { attr: { type: "checkbox", id } });
+      checkbox.checked = false;
+      checkbox.disabled = !folderDeletable;
+      checkbox.addEventListener("change", () => {
+        this.deleteNoteFolder = checkbox.checked;
+      });
+      const label = row.createEl("label", { text: "\u540C\u65F6\u5220\u9664\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939" });
+      label.htmlFor = id;
+      this.contentEl.createEl("p", { cls: "kc-input-hint", text: `\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\uFF1A${noteFolder}` });
+      if (!folderDeletable && folderReason) {
+        const reason = this.contentEl.createEl("p", { cls: "kc-delete-reason", text: folderReason });
+        reason.id = `${id}-reason`;
+        checkbox.setAttribute("aria-describedby", reason.id);
+      }
+    }
+    const actions = this.contentEl.createDiv({ cls: "kc-modal-actions" });
+    const cancel = actions.createEl("button", { text: "\u53D6\u6D88" });
+    cancel.type = "button";
+    cancel.addEventListener("click", () => this.close());
+    const confirm = actions.createEl("button", { cls: "mod-warning kc-delete-confirm", text: "\u5220\u9664\u753B\u5E03" });
+    confirm.type = "button";
+    confirm.addEventListener("click", () => {
+      if (this.settled) return;
+      confirm.disabled = true;
+      this.submit();
+    });
+    queueMicrotask(() => cancel.focus());
+  }
+  submit() {
+    if (this.settled) return;
+    this.settled = true;
+    this.resolve({ deleteNoteFolder: this.deleteNoteFolder });
+    this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+    if (!this.settled) {
+      this.settled = true;
+      this.resolve(null);
+    }
+  }
+};
+function requestBoardRename(app, options) {
+  return new Promise((resolve) => new RenameBoardModal(app, options, resolve).open());
+}
+function requestBoardDelete(app, options) {
+  return new Promise((resolve) => new DeleteBoardModal(app, options, resolve).open());
+}
+
 // src/board-capabilities.js
 function canMutateBoard({ writerOwned, loadError } = {}) {
   return writerOwned === true && !loadError;
@@ -1525,65 +1853,6 @@ function createLifecycleQueue() {
   return run;
 }
 
-// src/board-import.js
-var IMPORT_CARD = Object.freeze({ width: 320, height: 220 });
-var IMPORT_GAP = 24;
-function isMarkdownPath(path) {
-  return /\.md$/i.test(String(path != null ? path : "").trim());
-}
-function isInsideFolder(path, folderPath) {
-  const root = String(folderPath != null ? folderPath : "").replace(/^\/+|\/+$/g, "");
-  const value = String(path != null ? path : "");
-  return !root || value.startsWith(`${root}/`);
-}
-function planImport(paths, existingPaths) {
-  const existing = new Set(existingPaths != null ? existingPaths : []);
-  const seen = /* @__PURE__ */ new Set();
-  const duplicates = [];
-  const added = [];
-  const skippedExisting = [];
-  const skippedInvalid = [];
-  for (const raw of paths != null ? paths : []) {
-    const path = String(raw != null ? raw : "").trim();
-    if (!isMarkdownPath(path)) {
-      skippedInvalid.push(path);
-      continue;
-    }
-    if (seen.has(path)) {
-      duplicates.push(path);
-      continue;
-    }
-    seen.add(path);
-    if (existing.has(path)) skippedExisting.push(path);
-    else added.push(path);
-  }
-  return { added, skippedExisting, skippedInvalid, duplicates };
-}
-function contentRightTop(nodes) {
-  let right = -Infinity;
-  let top = Infinity;
-  for (const node of nodes != null ? nodes : []) {
-    right = Math.max(right, node.x + node.width);
-    top = Math.min(top, node.y);
-  }
-  return (nodes == null ? void 0 : nodes.length) ? { right, top } : null;
-}
-function layoutImportedCards(paths, existingNodes = [], { size = IMPORT_CARD, gap = IMPORT_GAP } = {}) {
-  const ordered = [...paths != null ? paths : []].sort((a, b) => a.localeCompare(b, "zh-CN"));
-  if (!ordered.length) return [];
-  const bounds2 = contentRightTop(existingNodes);
-  const baseX = bounds2 ? bounds2.right + gap : 0;
-  const baseY = bounds2 ? bounds2.top : 0;
-  const columns = Math.ceil(Math.sqrt(ordered.length));
-  return ordered.map((path, index) => ({
-    path,
-    point: {
-      x: baseX + index % columns * (size.width + gap),
-      y: baseY + Math.floor(index / columns) * (size.height + gap)
-    }
-  }));
-}
-
 // src/folder-scan.js
 var SCAN_CHUNK_SIZE = 200;
 var defaultYield = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -1643,7 +1912,7 @@ function isKeyboardFocus(element2, matches = (node, selector) => node.matches(se
 }
 
 // src/color-picker.js
-var import_obsidian = require("obsidian");
+var import_obsidian2 = require("obsidian");
 
 // src/color-picker-state.js
 function createPickerState(current = "neutral") {
@@ -1720,7 +1989,7 @@ var CardColorPicker = class {
       button.dataset.swatch = swatch.name;
       button.setAttribute("aria-label", swatch.selected ? `${swatch.name}\uFF08\u5F53\u524D\u989C\u8272\uFF09` : swatch.name);
       button.setAttribute("aria-pressed", String(swatch.selected));
-      if (swatch.selected) (0, import_obsidian.setIcon)(button, "check");
+      if (swatch.selected) (0, import_obsidian2.setIcon)(button, "check");
       button.addEventListener("click", () => {
         this.dispatch({ type: "focus", name: swatch.name });
         this.dispatch({ type: "confirm" });
@@ -1851,9 +2120,9 @@ function fitViewport(bounds2, { width, height } = {}, { padding = FIT_PADDING } 
 }
 
 // src/delete-modal.js
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 var nextDeleteControlId = 0;
-var DeleteCardsModal = class extends import_obsidian2.Modal {
+var DeleteCardsModal = class extends import_obsidian3.Modal {
   constructor(app, options, resolve) {
     super(app);
     this.options = options;
@@ -2738,9 +3007,9 @@ function normalizeBoardCreateInput(values) {
 }
 
 // src/input-modal.js
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 var nextControlId = 0;
-var InputModal = class extends import_obsidian3.Modal {
+var InputModal = class extends import_obsidian4.Modal {
   constructor(app, options, resolve) {
     super(app);
     this.options = options;
@@ -2814,7 +3083,7 @@ var InputModal = class extends import_obsidian3.Modal {
     }
     const error = (_b = (_a = this.options).validate) == null ? void 0 : _b.call(_a, values);
     if (error) {
-      new import_obsidian3.Notice(error);
+      new import_obsidian4.Notice(error);
       return;
     }
     this.result.submit(values);
@@ -3122,7 +3391,7 @@ function layoutUnits(nodes, selection) {
 }
 
 // src/readflow-import-modal.js
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/readflow-index.js
 function stringField(value) {
@@ -3160,7 +3429,7 @@ var FILTERS = [
   { key: "chapter", label: "\u7AE0\u8282", all: "\u5168\u90E8\u7AE0\u8282" },
   { key: "status", label: "\u72B6\u6001", all: "\u5168\u90E8\u72B6\u6001" }
 ];
-var ReadFlowImportModal = class extends import_obsidian4.Modal {
+var ReadFlowImportModal = class extends import_obsidian5.Modal {
   constructor(app, options, resolve) {
     var _a, _b, _c;
     super(app);
@@ -3318,7 +3587,7 @@ function dom(tag, className, text) {
   if (text !== void 0) element2.textContent = text;
   return element2;
 }
-var PromotionModal = class extends import_obsidian5.Modal {
+var PromotionModal = class extends import_obsidian6.Modal {
   constructor(app, preview, confirm) {
     super(app);
     this.preview = preview;
@@ -3342,10 +3611,10 @@ var PromotionModal = class extends import_obsidian5.Modal {
       try {
         await this.confirm();
         this.close();
-        new import_obsidian5.Notice("\u5173\u7CFB\u5DF2\u540C\u6B65");
+        new import_obsidian6.Notice("\u5173\u7CFB\u5DF2\u540C\u6B65");
       } catch (error) {
         submit.disabled = false;
-        new import_obsidian5.Notice(`\u5199\u5165\u5931\u8D25\uFF1A${error.message}`);
+        new import_obsidian6.Notice(`\u5199\u5165\u5931\u8D25\uFF1A${error.message}`);
       }
     });
   }
@@ -3353,7 +3622,7 @@ var PromotionModal = class extends import_obsidian5.Modal {
     this.contentEl.empty();
   }
 };
-var DraftRecoveryModal = class extends import_obsidian5.Modal {
+var DraftRecoveryModal = class extends import_obsidian6.Modal {
   constructor(app, title, body, retry) {
     super(app);
     this.draftTitle = title;
@@ -3379,7 +3648,7 @@ ${this.body}`;
         this.close();
       } catch (error) {
         retry.disabled = false;
-        new import_obsidian5.Notice(`\u4ECD\u65E0\u6CD5\u521B\u5EFA\uFF1A${error.message}`);
+        new import_obsidian6.Notice(`\u4ECD\u65E0\u6CD5\u521B\u5EFA\uFF1A${error.message}`);
       }
     });
   }
@@ -3387,7 +3656,7 @@ ${this.body}`;
     this.contentEl.empty();
   }
 };
-var MarkdownFilePicker = class extends import_obsidian5.FuzzySuggestModal {
+var MarkdownFilePicker = class extends import_obsidian6.FuzzySuggestModal {
   constructor(app, onChoose) {
     super(app);
     this.onChoose = onChoose;
@@ -3403,7 +3672,7 @@ var MarkdownFilePicker = class extends import_obsidian5.FuzzySuggestModal {
     this.onChoose(file);
   }
 };
-var FolderPicker = class extends import_obsidian5.FuzzySuggestModal {
+var FolderPicker = class extends import_obsidian6.FuzzySuggestModal {
   constructor(app, onChoose) {
     super(app);
     this.onChoose = onChoose;
@@ -3419,7 +3688,7 @@ var FolderPicker = class extends import_obsidian5.FuzzySuggestModal {
     this.onChoose(folder);
   }
 };
-var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
+var KnowledgeCanvasView = class extends import_obsidian6.ItemView {
   constructor(leaf, plugin, options = {}) {
     var _a;
     super(leaf);
@@ -3442,6 +3711,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     this.switching = false;
     this.boardSelect = null;
     this.boardCreateButton = null;
+    this.boardMenuButton = null;
     this.readflowButton = null;
     this.toolEntry = createToolEntryState();
     this.toolEntryEl = null;
@@ -3484,7 +3754,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     } catch (error) {
       this.loadError = error;
       this.writerOwned = false;
-      new import_obsidian5.Notice(`\u753B\u677F\u52A0\u8F7D\u5931\u8D25\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u753B\u677F\u52A0\u8F7D\u5931\u8D25\uFF1A${error.message}`);
     }
     this.attachDocumentListeners();
   }
@@ -3612,19 +3882,19 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     try {
       const matches = await scanFolderFiles(this.app.vault.getFiles(), folderPath, {
         onChunk: () => {
-          if (!notice) notice = new import_obsidian5.Notice("\u6B63\u5728\u626B\u63CF\u6587\u4EF6\u5939\u2026", 0);
+          if (!notice) notice = new import_obsidian6.Notice("\u6B63\u5728\u626B\u63CF\u6587\u4EF6\u5939\u2026", 0);
         }
       });
       paths = matches.map((file) => file.path);
     } catch (error) {
-      new import_obsidian5.Notice(`\u626B\u63CF\u5931\u8D25\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u626B\u63CF\u5931\u8D25\uFF1A${error.message}`);
       return false;
     } finally {
       notice == null ? void 0 : notice.hide();
       this.setImporting(false);
     }
     if (!paths.length) {
-      new import_obsidian5.Notice("\u8BE5\u6587\u4EF6\u5939\u6CA1\u6709 Markdown \u6587\u4EF6");
+      new import_obsidian6.Notice("\u8BE5\u6587\u4EF6\u5939\u6CA1\u6709 Markdown \u6587\u4EF6");
       return false;
     }
     return this.importMarkdownFiles(paths);
@@ -3639,12 +3909,12 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     if (!this.isWritable() || this.importing) return false;
     this.setImporting(true);
     const busy = setTimeout(() => {
-      this.importNotice = new import_obsidian5.Notice("\u6B63\u5728\u5BFC\u5165\u6587\u4EF6\u2026", 0);
+      this.importNotice = new import_obsidian6.Notice("\u6B63\u5728\u5BFC\u5165\u6587\u4EF6\u2026", 0);
     }, 300);
     try {
       const requested = (paths != null ? paths : []).map((path) => String(path != null ? path : "").trim()).filter((path) => /\.md$/i.test(path));
       if (!requested.length) {
-        new import_obsidian5.Notice("\u6CA1\u6709\u65B0\u589E\u5361\u7247\uFF1A\u6240\u9009\u5185\u5BB9\u4E0D\u662F Markdown\u3002");
+        new import_obsidian6.Notice("\u6CA1\u6709\u65B0\u589E\u5361\u7247\uFF1A\u6240\u9009\u5185\u5BB9\u4E0D\u662F Markdown\u3002");
         return false;
       }
       let added = 0;
@@ -3667,10 +3937,10 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       }, "\u5BFC\u5165\u5931\u8D25");
       const skipped = requested.length - added;
       if (!done) {
-        new import_obsidian5.Notice(`\u6CA1\u6709\u65B0\u589E\u5361\u7247\uFF1A\u8DF3\u8FC7 ${skipped} \u4E2A\u3002`);
+        new import_obsidian6.Notice(`\u6CA1\u6709\u65B0\u589E\u5361\u7247\uFF1A\u8DF3\u8FC7 ${skipped} \u4E2A\u3002`);
         return false;
       }
-      new import_obsidian5.Notice(`\u5DF2\u52A0\u5165 ${added} \u5F20\u5361\u7247\uFF1B\u8DF3\u8FC7 ${skipped} \u4E2A\uFF08\u5DF2\u5B58\u5728 ${skippedExisting}\uFF0C\u5931\u8D25 ${failed}\uFF09\u3002`);
+      new import_obsidian6.Notice(`\u5DF2\u52A0\u5165 ${added} \u5F20\u5361\u7247\uFF1B\u8DF3\u8FC7 ${skipped} \u4E2A\uFF08\u5DF2\u5B58\u5728 ${skippedExisting}\uFF0C\u5931\u8D25 ${failed}\uFF09\u3002`);
       return true;
     } finally {
       clearTimeout(busy);
@@ -3719,7 +3989,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   }
   async performReloadBoard({ notify = false } = {}) {
     if (this.editor && !await this.editor.close()) {
-      new import_obsidian5.Notice("\u6D6E\u52A8\u7F16\u8F91\u5668\u4ECD\u6709\u672A\u4FDD\u5B58\u5185\u5BB9\uFF0C\u5DF2\u53D6\u6D88\u91CD\u8F7D");
+      new import_obsidian6.Notice("\u6D6E\u52A8\u7F16\u8F91\u5668\u4ECD\u6709\u672A\u4FDD\u5B58\u5185\u5BB9\uFF0C\u5DF2\u53D6\u6D88\u91CD\u8F7D");
       return;
     }
     const pause = this.boardMutations.pause();
@@ -3727,7 +3997,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       await this.drainBoardWrites();
     } catch (error) {
       this.boardMutations.resume(pause);
-      new import_obsidian5.Notice(`\u753B\u677F\u8FD8\u6709\u6539\u52A8\u6CA1\u80FD\u5199\u5165\uFF0C\u5DF2\u53D6\u6D88\u91CD\u8F7D\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u753B\u677F\u8FD8\u6709\u6539\u52A8\u6CA1\u80FD\u5199\u5165\uFF0C\u5DF2\u53D6\u6D88\u91CD\u8F7D\uFF1A${error.message}`);
       return;
     }
     try {
@@ -3735,10 +4005,10 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       this.board = board;
       this.loadError = null;
       this.render();
-      if (notify) new import_obsidian5.Notice("\u753B\u677F\u5DF2\u4ECE\u78C1\u76D8\u91CD\u8F7D");
+      if (notify) new import_obsidian6.Notice("\u753B\u677F\u5DF2\u4ECE\u78C1\u76D8\u91CD\u8F7D");
     } catch (error) {
       this.loadError = error;
-      new import_obsidian5.Notice(`\u4ECD\u65E0\u6CD5\u8F7D\u5165\u753B\u677F\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u4ECD\u65E0\u6CD5\u8F7D\u5165\u753B\u677F\uFF1A${error.message}`);
       this.render();
     } finally {
       this.boardMutations.resume(pause);
@@ -3747,9 +4017,9 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   isWritable() {
     if (canMutateBoard({ writerOwned: this.writerOwned, loadError: this.loadError })) return true;
     if (this.loadError) {
-      new import_obsidian5.Notice("\u753B\u677F\u8BFB\u53D6\u5931\u8D25\uFF0C\u4FEE\u590D\u5E76\u91CD\u65B0\u8F7D\u5165\u524D\u4E0D\u4F1A\u5199\u5165\u539F\u6587\u4EF6\u3002");
+      new import_obsidian6.Notice("\u753B\u677F\u8BFB\u53D6\u5931\u8D25\uFF0C\u4FEE\u590D\u5E76\u91CD\u65B0\u8F7D\u5165\u524D\u4E0D\u4F1A\u5199\u5165\u539F\u6587\u4EF6\u3002");
     } else {
-      new import_obsidian5.Notice("\u8BE5\u753B\u5E03\u5DF2\u5728\u5176\u4ED6\u89C6\u56FE\u6253\u5F00\uFF0C\u5F53\u524D\u4E3A\u53EA\u8BFB\u3002");
+      new import_obsidian6.Notice("\u8BE5\u753B\u5E03\u5DF2\u5728\u5176\u4ED6\u89C6\u56FE\u6253\u5F00\uFF0C\u5F53\u524D\u4E3A\u53EA\u8BFB\u3002");
     }
     return false;
   }
@@ -3797,7 +4067,8 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     const builders = {
       boardSelect: () => this.buildBoardSelect(),
       newBoard: () => this.buildNewBoardButton(),
-      importReadFlow: () => this.buildImportReadFlowButton()
+      importReadFlow: () => this.buildImportReadFlowButton(),
+      boardMenu: () => this.buildBoardMenuButton()
     };
     for (const action of TOPBAR_BOARD_ACTIONS) {
       if (action === "importReadFlow" && !this.plugin.isReadFlowIntegrationEnabled()) continue;
@@ -3839,6 +4110,183 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     this.readflowButton = button;
     return button;
   }
+  /**
+   * Low-frequency, potentially destructive board actions live behind `···`: renaming and
+   * deleting a workspace is never a click away from the actions used while working.
+   */
+  buildBoardMenuButton() {
+    const button = dom("button", "kc-board-menu", "\xB7\xB7\xB7");
+    button.type = "button";
+    button.setAttribute("aria-label", "\u753B\u5E03\u7BA1\u7406");
+    button.setAttribute("aria-haspopup", "menu");
+    button.addEventListener("click", (event) => this.openBoardMenu(event));
+    this.boardMenuButton = button;
+    return button;
+  }
+  openBoardMenu(event) {
+    const manage = canManageBoard(this.boardPath);
+    const menu = new import_obsidian6.Menu();
+    menu.addItem((item) => item.setTitle("\u91CD\u547D\u540D\u753B\u5E03").setIcon("pencil").setDisabled(!manage.allowed).onClick(() => this.renameBoard()));
+    menu.addItem((item) => item.setTitle("\u5220\u9664\u753B\u5E03").setIcon("trash-2").setDisabled(!manage.allowed).onClick(() => this.deleteBoard()));
+    if (!manage.allowed) {
+      menu.addSeparator();
+      menu.addItem((item) => item.setTitle(manage.reason).setDisabled(true));
+    }
+    menu.showAtMouseEvent(event);
+  }
+  /** Opens the rename dialog. A cancelled dialog changes nothing. */
+  async renameBoard() {
+    const manage = canManageBoard(this.boardPath);
+    if (!manage.allowed) {
+      new import_obsidian6.Notice(manage.reason);
+      return false;
+    }
+    const noteFolder = boardNoteFolder(this.board);
+    const existingPaths = this.plugin.listCanvasPaths();
+    const folderPaths = this.plugin.listFolderPaths();
+    const answer = await requestBoardRename(this.app, {
+      currentName: boardNameFromPath2(this.boardPath),
+      noteFolder,
+      validate: (values) => {
+        try {
+          planBoardRename({
+            path: this.boardPath,
+            name: values.name,
+            existingPaths,
+            folderPaths,
+            noteFolder,
+            renameNoteFolder: values.renameNoteFolder
+          });
+          return null;
+        } catch (error) {
+          return error.message;
+        }
+      }
+    });
+    if (!answer) return false;
+    return this.lifecycles(() => this.performRenameBoard(answer));
+  }
+  /**
+   * Renames inside the lifecycle queue, so a switch, reload or hand-off can never interleave
+   * with the path swap. The view keeps its board until the plugin reports the file is really
+   * at its new path; a failure leaves both the path and the board untouched.
+   */
+  async performRenameBoard({ name, renameNoteFolder }) {
+    if (!this.isWritable()) return false;
+    if (this.editor && !await this.editor.close()) return false;
+    const previousPath = this.boardPath;
+    let plan;
+    try {
+      plan = planBoardRename({
+        path: previousPath,
+        name,
+        existingPaths: this.plugin.listCanvasPaths(),
+        folderPaths: this.plugin.listFolderPaths(),
+        noteFolder: boardNoteFolder(this.board),
+        renameNoteFolder
+      });
+    } catch (error) {
+      new import_obsidian6.Notice(`\u65E0\u6CD5\u91CD\u547D\u540D\u753B\u5E03\uFF1A${error.message}`);
+      return false;
+    }
+    const pause = this.boardMutations.pause();
+    this.setBoardControlsDisabled(true);
+    try {
+      await this.drainBoardWrites();
+      const result = await this.plugin.renameBoard(plan, { board: this.board, token: this });
+      this.releaseBoardWriter(previousPath);
+      this.boardPath = result.path;
+      this.board = result.board;
+      this.loadError = null;
+      await this.plugin.setLastBoardPath(result.path);
+      this.acquireBoardWriter();
+      new import_obsidian6.Notice(`\u753B\u5E03\u5DF2\u91CD\u547D\u540D\u4E3A\u300C${result.name}\u300D`);
+      return true;
+    } catch (error) {
+      new import_obsidian6.Notice(`\u91CD\u547D\u540D\u753B\u5E03\u5931\u8D25\uFF1A${error.message}`);
+      return false;
+    } finally {
+      this.boardMutations.resume(pause);
+      this.setBoardControlsDisabled(false);
+      this.refreshBoardList();
+      this.render();
+    }
+  }
+  /** Opens the delete dialog. The note folder is offered only when proven safe. */
+  async deleteBoard() {
+    const manage = canManageBoard(this.boardPath);
+    if (!manage.allowed) {
+      new import_obsidian6.Notice(manage.reason);
+      return false;
+    }
+    const noteFolder = boardNoteFolder(this.board);
+    const analysis = noteFolder ? analyzeBoardNoteFolder({
+      folderPath: noteFolder,
+      files: this.plugin.listFilePaths(),
+      folders: this.plugin.listFolderPaths(),
+      board: this.board
+    }) : { deletable: false, reason: "\u8BE5\u753B\u5E03\u6CA1\u6709\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939" };
+    const answer = await requestBoardDelete(this.app, {
+      name: boardNameFromPath2(this.boardPath),
+      noteFolder,
+      folderDeletable: analysis.deletable,
+      folderReason: analysis.reason
+    });
+    if (!answer) return false;
+    return this.lifecycles(() => this.performDeleteBoard(answer));
+  }
+  /**
+   * Deletes the canvas (and only the note folder the user opted into), then falls back to the
+   * default board. The folder is re-scanned right before deletion: a note added while the
+   * confirmation was open cancels the whole operation instead of being destroyed.
+   */
+  async performDeleteBoard({ deleteNoteFolder }) {
+    if (!this.isWritable()) return false;
+    if (this.editor && !await this.editor.close()) return false;
+    const path = this.boardPath;
+    const noteFolder = boardNoteFolder(this.board);
+    if (deleteNoteFolder && noteFolder) {
+      const recheck = analyzeBoardNoteFolder({
+        folderPath: noteFolder,
+        files: this.plugin.listFilePaths(),
+        folders: this.plugin.listFolderPaths(),
+        board: this.board
+      });
+      if (!recheck.deletable) {
+        new import_obsidian6.Notice(`\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\u5185\u5BB9\u5DF2\u53D8\u5316\uFF0C\u5DF2\u53D6\u6D88\u5220\u9664\uFF1A${recheck.reason}`);
+        return false;
+      }
+    }
+    const pause = this.boardMutations.pause();
+    this.setBoardControlsDisabled(true);
+    try {
+      await this.drainBoardWrites();
+      const outcome = await this.plugin.deleteBoard(path, {
+        deleteNoteFolder: deleteNoteFolder && noteFolder ? noteFolder : null
+      });
+      this.releaseBoardWriter(path);
+      await this.plugin.ensureBoard();
+      const fallback = this.plugin.resolveBoardPath(DEFAULT_BOARD_PATH);
+      const next = await this.plugin.boardStore.load(fallback);
+      this.boardPath = fallback;
+      this.board = next;
+      this.selected.clear();
+      this.search = "";
+      this.loadError = null;
+      await this.plugin.setLastBoardPath(fallback);
+      this.acquireBoardWriter();
+      new import_obsidian6.Notice(outcome.message);
+      return true;
+    } catch (error) {
+      new import_obsidian6.Notice(`\u5220\u9664\u753B\u5E03\u5931\u8D25\uFF1A${error.message}`);
+      return false;
+    } finally {
+      this.boardMutations.resume(pause);
+      this.setBoardControlsDisabled(false);
+      this.refreshBoardList();
+      this.render();
+    }
+  }
   refreshBoardList() {
     const select = this.boardSelect;
     if (!select) return;
@@ -3860,6 +4308,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     this.switching = disabled;
     if (this.boardSelect) this.boardSelect.disabled = disabled;
     if (this.boardCreateButton) this.boardCreateButton.disabled = disabled;
+    if (this.boardMenuButton) this.boardMenuButton.disabled = disabled;
   }
   /**
    * Switching is all-or-nothing and serialised: two switches must never interleave their
@@ -3895,7 +4344,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       this.plugin.boardPath = previous.boardPath;
       this.boardPath = previous.boardPath;
       this.plugin.settings.lastBoardPath = previous.lastBoardPath;
-      new import_obsidian5.Notice(`\u5207\u6362\u753B\u5E03\u5931\u8D25\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u5207\u6362\u753B\u5E03\u5931\u8D25\uFF1A${error.message}`);
       this.render();
       return false;
     } finally {
@@ -3923,20 +4372,20 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     if (!result) return;
     const normalized = normalizeBoardCreateInput(result);
     if (!normalized) {
-      new import_obsidian5.Notice("\u753B\u5E03\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A");
+      new import_obsidian6.Notice("\u753B\u5E03\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A");
       return;
     }
     let path;
     try {
       path = await this.plugin.createBoardFile(normalized.name, { createNoteFolder: normalized.createNoteFolder });
     } catch (error) {
-      new import_obsidian5.Notice(`\u65E0\u6CD5\u65B0\u5EFA\u753B\u5E03\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u65E0\u6CD5\u65B0\u5EFA\u753B\u5E03\uFF1A${error.message}`);
       return;
     }
     await this.switchBoard(path);
   }
   openReloadMenu(event) {
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     for (const action of RELOAD_ACTIONS) {
       menu.addItem((item) => item.setTitle(action.title).setIcon(action.icon).onClick(() => this.runReload(action.id)));
     }
@@ -3949,7 +4398,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       board: () => this.reloadBoard({ notify: true }),
       plugin: () => this.reloadPlugin()
     });
-    if (!result.ok) new import_obsidian5.Notice(`\u91CD\u8F7D\u672A\u6267\u884C\uFF1A${result.reason}`);
+    if (!result.ok) new import_obsidian6.Notice(`\u91CD\u8F7D\u672A\u6267\u884C\uFF1A${result.reason}`);
   }
   async reloadPlugin() {
     var _a, _b;
@@ -3959,7 +4408,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     await manager.disablePlugin(id);
     await manager.enablePlugin(id);
     await ((_b = (_a = manager.getPlugin(id)) == null ? void 0 : _a.activate) == null ? void 0 : _b.call(_a));
-    new import_obsidian5.Notice("\u63D2\u4EF6\u5DF2\u91CD\u8F7D");
+    new import_obsidian6.Notice("\u63D2\u4EF6\u5DF2\u91CD\u8F7D");
   }
   applyCanvasSearch() {
     var _a, _b;
@@ -4034,7 +4483,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     toggle.type = "button";
     toggle.setAttribute("aria-label", view.ariaLabel);
     toggle.setAttribute("aria-expanded", view.ariaExpanded);
-    (0, import_obsidian5.setIcon)(toggle, view.icon);
+    (0, import_obsidian6.setIcon)(toggle, view.icon);
     toggle.addEventListener("click", () => this.setToolEntryExpanded(!this.toolEntry.expanded));
     entry.append(toggle);
     if (!view.expanded) return;
@@ -4058,7 +4507,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   /** The expanded entry's "布局" menu: the whole arrange toolkit without selecting first. */
   openLayoutMenu(event) {
     const empty = !this.selected.size;
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     this.appendLayoutItems(menu, { disabled: empty });
     menu.addSeparator();
     this.appendAlignItems(menu, { disabled: empty });
@@ -4302,7 +4751,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
         const path = normalizeFilePath(result);
         const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
         if (!((_a2 = file == null ? void 0 : file.path) == null ? void 0 : _a2.toLowerCase().endsWith(".md"))) {
-          new import_obsidian5.Notice("\u672A\u627E\u5230\u8BE5 Markdown \u6587\u4EF6");
+          new import_obsidian6.Notice("\u672A\u627E\u5230\u8BE5 Markdown \u6587\u4EF6");
           return;
         }
         await this.mutateBoard((next) => {
@@ -4482,7 +4931,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     magnet.setAttribute("aria-label", "\u5438\u9644\u5BF9\u9F50");
     magnet.title = this.snapEnabled ? "\u5438\u9644\u5BF9\u9F50\u5DF2\u5F00\u542F\uFF08\u6309\u4F4F Alt \u4E34\u65F6\u5173\u95ED\uFF09" : "\u5438\u9644\u5BF9\u9F50\u5DF2\u5173\u95ED";
     magnet.classList.toggle("is-active", this.snapEnabled);
-    (0, import_obsidian5.setIcon)(magnet, "magnet");
+    (0, import_obsidian6.setIcon)(magnet, "magnet");
     const syncMagnet = () => {
       magnet.setAttribute("aria-pressed", String(this.snapEnabled));
       magnet.classList.toggle("is-active", this.snapEnabled);
@@ -4492,14 +4941,14 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     magnet.addEventListener("click", () => {
       this.snapEnabled = !this.snapEnabled;
       syncMagnet();
-      new import_obsidian5.Notice(this.snapEnabled ? "\u5438\u9644\u5DF2\u5F00\u542F" : "\u5438\u9644\u5DF2\u5173\u95ED");
+      new import_obsidian6.Notice(this.snapEnabled ? "\u5438\u9644\u5DF2\u5F00\u542F" : "\u5438\u9644\u5DF2\u5173\u95ED");
     });
     controls.append(magnet);
     const locate = dom("button", "kc-locate");
     locate.type = "button";
     locate.setAttribute("aria-label", "\u5B9A\u4F4D\u753B\u5E03\u5185\u5BB9");
     locate.title = "\u5B9A\u4F4D\u753B\u5E03\u5185\u5BB9";
-    (0, import_obsidian5.setIcon)(locate, "locate-fixed");
+    (0, import_obsidian6.setIcon)(locate, "locate-fixed");
     locate.addEventListener("click", () => this.locateContent());
     controls.append(locate);
     for (const [label, delta] of [["\u2212", -0.2], ["\uFF0B", 0.2]]) {
@@ -4521,7 +4970,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     const bounds2 = contentBounds2(this.board.nodes);
     const next = bounds2 ? fitViewport(bounds2, { width: this.stage.clientWidth, height: this.stage.clientHeight }) : null;
     if (!next) {
-      new import_obsidian5.Notice("\u753B\u5E03\u6682\u65E0\u5185\u5BB9");
+      new import_obsidian6.Notice("\u753B\u5E03\u6682\u65E0\u5185\u5BB9");
       return false;
     }
     this.viewport = next;
@@ -4535,12 +4984,12 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   async applyLayoutCommand(command) {
     if (!this.isWritable()) return false;
     if (!this.selected.size) {
-      new import_obsidian5.Notice("\u8BF7\u5148\u9009\u62E9\u8981\u6574\u7406\u7684\u5361\u7247");
+      new import_obsidian6.Notice("\u8BF7\u5148\u9009\u62E9\u8981\u6574\u7406\u7684\u5361\u7247");
       return false;
     }
     const selection = new Set(this.selected);
     if (!layoutUnits(this.board.nodes, selection).length) {
-      new import_obsidian5.Notice("\u5F53\u524D\u9009\u62E9\u6CA1\u6709\u53EF\u6574\u7406\u7684\u5361\u7247");
+      new import_obsidian6.Notice("\u5F53\u524D\u9009\u62E9\u6CA1\u6709\u53EF\u6574\u7406\u7684\u5361\u7247");
       return false;
     }
     return this.mutateBoard((next) => {
@@ -4794,7 +5243,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     }
     const file = decoded ? this.app.vault.getAbstractFileByPath(decoded) : null;
     if ((_d = file == null ? void 0 : file.path) == null ? void 0 : _d.endsWith(".md")) this.addFile(file, screenToWorld(this.localPoint(event), this.viewport));
-    else new import_obsidian5.Notice("\u8BF7\u901A\u8FC7\u6587\u4EF6\u83DC\u5355\u201C\u52A0\u5165\u77E5\u8BC6\u753B\u677F\u201D\uFF0C\u6216\u62D6\u5165 Markdown \u8DEF\u5F84\u3002");
+    else new import_obsidian6.Notice("\u8BF7\u901A\u8FC7\u6587\u4EF6\u83DC\u5355\u201C\u52A0\u5165\u77E5\u8BC6\u753B\u677F\u201D\uFF0C\u6216\u62D6\u5165 Markdown \u8DEF\u5F84\u3002");
   }
   onKeyDown(event) {
     if (event.key === "Escape") {
@@ -4840,7 +5289,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     if (!result) return;
     const note = normalizeStickyNote(result);
     if (!note) {
-      new import_obsidian5.Notice("\u6807\u9898\u4E0D\u80FD\u4E3A\u7A7A");
+      new import_obsidian6.Notice("\u6807\u9898\u4E0D\u80FD\u4E3A\u7A7A");
       return;
     }
     const { title, body } = note;
@@ -4854,7 +5303,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     try {
       await create();
     } catch (error) {
-      new import_obsidian5.Notice(`\u521B\u5EFA\u5931\u8D25\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u521B\u5EFA\u5931\u8D25\uFF1A${error.message}`);
       new DraftRecoveryModal(this.app, title, body, create).open();
     }
   }
@@ -4882,7 +5331,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
         readFlowFrontmatter: readFlow ? frontmatter : null,
         excerptAnchor: excerpt ? node.kcExcerpt : null,
         relations: this.board.edges.filter((edge) => edge.fromNode === node.id || edge.toNode === node.id),
-        renderMarkdown: (content, host, path) => import_obsidian5.MarkdownRenderer.render(this.app, content, host, path, this),
+        renderMarkdown: (content, host, path) => import_obsidian6.MarkdownRenderer.render(this.app, content, host, path, this),
         openSource: () => this.app.workspace.getLeaf(false).openFile(sourceFile != null ? sourceFile : current.file),
         onTextContextMenu: (payload) => this.openTextContextMenu(payload),
         // The handler returns the sync promise: EditorSession awaits it, so "saved" means
@@ -4895,7 +5344,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       await this.editor.open();
       if (edit) this.editor.toggleEdit();
     } catch (error) {
-      new import_obsidian5.Notice(`\u65E0\u6CD5\u6253\u5F00\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u65E0\u6CD5\u6253\u5F00\uFF1A${error.message}`);
     }
   }
   /**
@@ -4905,7 +5354,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   openTextContextMenu({ event, intent }) {
     const editor = this.editor;
     if (!editor) return;
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     const offset = intent ? Math.min(intent.start, intent.end) : editor.textState().start;
     menu.addItem((item) => item.setTitle("\u6DFB\u52A0\u65F6\u95F4\u6233").onClick(() => this.addTimestampAtCursor(offset)));
     if (!intent) {
@@ -4941,11 +5390,11 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     if (!this.isWritable()) return false;
     const result = addParagraphTimestamp(editor.session.text, offset);
     if (!result) {
-      new import_obsidian5.Notice("\u5149\u6807\u4E0D\u5728\u53EF\u6807\u8BB0\u7684\u6BB5\u843D\u5185");
+      new import_obsidian6.Notice("\u5149\u6807\u4E0D\u5728\u53EF\u6807\u8BB0\u7684\u6BB5\u843D\u5185");
       return false;
     }
     if (!result.added) {
-      new import_obsidian5.Notice("\u8BE5\u6BB5\u843D\u5DF2\u6709\u65F6\u95F4\u6233");
+      new import_obsidian6.Notice("\u8BE5\u6BB5\u843D\u5DF2\u6709\u65F6\u95F4\u6233");
       return false;
     }
     return editor.applyTextTransform(() => ({ text: result.text, start: offset, end: offset }));
@@ -4973,12 +5422,12 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     var _a;
     if (!this.isWritable()) return false;
     if (this.editor && !await this.editor.flushPending()) {
-      new import_obsidian5.Notice("\u6E90\u6587\u4EF6\u8FD8\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u5DF2\u53D6\u6D88\u521B\u5EFA\u6458\u5F55");
+      new import_obsidian6.Notice("\u6E90\u6587\u4EF6\u8FD8\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u5DF2\u53D6\u6D88\u521B\u5EFA\u6458\u5F55");
       return false;
     }
     const anchor = (_a = this.editor) == null ? void 0 : _a.excerptAnchorFor(intent);
     if (!anchor) {
-      new import_obsidian5.Notice("\u8BF7\u5148\u9009\u4E2D\u4E00\u6BB5\u975E\u7A7A\u6587\u672C");
+      new import_obsidian6.Notice("\u8BF7\u5148\u9009\u4E2D\u4E00\u6BB5\u975E\u7A7A\u6587\u672C");
       return false;
     }
     const done = await this.mutateBoard((next) => {
@@ -4992,7 +5441,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       }));
       return true;
     }, "\u521B\u5EFA\u6458\u5F55\u5931\u8D25");
-    if (done) new import_obsidian5.Notice("\u5DF2\u751F\u6210\u6458\u5F55\u8D34\u7EB8");
+    if (done) new import_obsidian6.Notice("\u5DF2\u751F\u6210\u6458\u5F55\u8D34\u7EB8");
     return done;
   }
   /** Every layout entry the menus offer, in one place so canvas and card menus agree. */
@@ -5016,10 +5465,10 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     event.preventDefault();
     event.stopPropagation();
     const hasSelection = this.selected.size > 0;
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     menu.addItem((item) => item.setTitle("\u5168\u9009").setIcon("box-select").onClick(() => this.applySelection(selectAllIds(this.board.nodes))));
     menu.addSeparator();
-    const layoutMenu = new import_obsidian5.Menu();
+    const layoutMenu = new import_obsidian6.Menu();
     this.appendLayoutItems(layoutMenu, { disabled: !hasSelection });
     let submenu = false;
     menu.addItem((item) => {
@@ -5035,7 +5484,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     menu.addSeparator();
     menu.addItem((item) => item.setTitle("\u5438\u9644\u5BF9\u9F50").setIcon("magnet").setChecked(this.snapEnabled).onClick(() => {
       this.snapEnabled = !this.snapEnabled;
-      new import_obsidian5.Notice(this.snapEnabled ? "\u5438\u9644\u5DF2\u5F00\u542F" : "\u5438\u9644\u5DF2\u5173\u95ED");
+      new import_obsidian6.Notice(this.snapEnabled ? "\u5438\u9644\u5DF2\u5F00\u542F" : "\u5438\u9644\u5DF2\u5173\u95ED");
     }));
     menu.showAtMouseEvent(event);
   }
@@ -5046,7 +5495,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     const selectedGroups = this.board.nodes.filter((node) => isGroupNode(node) && this.selected.has(node.id));
     const grouped = new Set(this.board.nodes.filter(isGroupNode).flatMap((group) => group.members));
     const ungrouped = this.board.nodes.filter((node) => this.selected.has(node.id) && !isGroupNode(node) && !grouped.has(node.id));
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     if (!selectedGroups.length && ungrouped.length >= 2) {
       menu.addItem((item) => item.setTitle("\u7F16\u7EC4").setIcon("group").onClick(() => this.createGroupFromSelection()));
     }
@@ -5074,7 +5523,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       this.multiSelectMenu(event);
       return;
     }
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     menu.addItem((item) => item.setTitle("\u89E3\u9664\u5206\u7EC4").onClick(() => this.ungroupSelection([group.id])));
     menu.addItem((item) => item.setTitle("\u5220\u9664\u5206\u7EC4\u6846").onClick(() => this.removeGroup(group.id)));
     menu.showAtMouseEvent(event);
@@ -5092,7 +5541,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       this.multiSelectMenu(event);
       return;
     }
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     const collapseTitle = node.collapsed === true ? "\u5C55\u5F00" : "\u6298\u53E0";
     menu.addItem((item) => item.setTitle("\u989C\u8272").setIcon("palette").onClick(() => this.openColorPicker(node)));
     menu.addSeparator();
@@ -5173,7 +5622,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   }
   edgeMenu(event, edge) {
     event.preventDefault();
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     menu.addItem((item) => item.setTitle("\u7F16\u8F91\u5173\u7CFB\u540D\u79F0").onClick(() => this.editEdgeLabel(edge)));
     for (const [title, fromEnd, toEnd] of [["\u5355\u5411 \u2192", "none", "arrow"], ["\u53CC\u5411 \u2194", "arrow", "arrow"], ["\u65E0\u65B9\u5411 \u2014", "none", "none"]]) {
       menu.addItem((item) => item.setTitle(title).onClick(() => {
@@ -5227,7 +5676,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       const preview = previewPromotion(edge, this.board.nodes, files, sourceNode);
       new PromotionModal(this.app, preview, () => applyPromotion(preview, this.plugin.repository)).open();
     } catch (error) {
-      new import_obsidian5.Notice(`\u65E0\u6CD5\u751F\u6210\u5199\u5165\u9884\u89C8\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u65E0\u6CD5\u751F\u6210\u5199\u5165\u9884\u89C8\uFF1A${error.message}`);
     }
   }
   removeSelection() {
@@ -5281,11 +5730,11 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     this.selected.clear();
     this.render();
     if (!((_c = plan.nodeIds) == null ? void 0 : _c.length)) {
-      new import_obsidian5.Notice(`\u5DF2\u79FB\u9664 ${plan.edgeIds.length} \u6761\u5173\u7CFB`);
+      new import_obsidian6.Notice(`\u5DF2\u79FB\u9664 ${plan.edgeIds.length} \u6761\u5173\u7CFB`);
       return true;
     }
     if (!trashPaths.length) {
-      new import_obsidian5.Notice(`\u5DF2\u79FB\u9664 ${plan.nodeIds.length} \u9879`);
+      new import_obsidian6.Notice(`\u5DF2\u79FB\u9664 ${plan.nodeIds.length} \u9879`);
       return true;
     }
     let trashable = trashPaths;
@@ -5300,14 +5749,14 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       blocked = trashPaths.map((path) => ({ path, references: [], reason: error.message }));
     }
     if (blocked.length) {
-      new import_obsidian5.Notice(`\u4EE5\u4E0B\u6E90\u6587\u4EF6\u4ECD\u88AB\u5F15\u7528\u6216\u65E0\u6CD5\u786E\u8BA4\uFF0C\u5DF2\u53EA\u4ECE\u753B\u677F\u79FB\u9664\uFF1A${blocked.map((item) => item.path).join("\u3001")}`);
+      new import_obsidian6.Notice(`\u4EE5\u4E0B\u6E90\u6587\u4EF6\u4ECD\u88AB\u5F15\u7528\u6216\u65E0\u6CD5\u786E\u8BA4\uFF0C\u5DF2\u53EA\u4ECE\u753B\u677F\u79FB\u9664\uFF1A${blocked.map((item) => item.path).join("\u3001")}`);
     }
     if (!trashable.length) {
-      new import_obsidian5.Notice(`\u5DF2\u79FB\u9664 ${plan.nodeIds.length} \u9879\uFF1B\u672A\u79FB\u5165\u5E9F\u7EB8\u7BD3\u3002`);
+      new import_obsidian6.Notice(`\u5DF2\u79FB\u9664 ${plan.nodeIds.length} \u9879\uFF1B\u672A\u79FB\u5165\u5E9F\u7EB8\u7BD3\u3002`);
       return true;
     }
     const summary = summarizeTrash(await this.plugin.trashSources(trashable));
-    new import_obsidian5.Notice(`\u5DF2\u79FB\u9664 ${plan.nodeIds.length} \u9879\uFF1B${summary.message}`);
+    new import_obsidian6.Notice(`\u5DF2\u79FB\u9664 ${plan.nodeIds.length} \u9879\uFF1B${summary.message}`);
     return true;
   }
   /** Collapse hides the body only: height, Markdown, relations, and search are untouched. */
@@ -5352,7 +5801,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       next.nodes.unshift(group);
       return true;
     }, "\u7F16\u7EC4\u5931\u8D25");
-    if (failure) new import_obsidian5.Notice(`\u7F16\u7EC4\u5931\u8D25\uFF1A${failure.message}`);
+    if (failure) new import_obsidian6.Notice(`\u7F16\u7EC4\u5931\u8D25\uFF1A${failure.message}`);
     if (!done) return false;
     this.selected = /* @__PURE__ */ new Set([group.id]);
     this.updateSelection();
@@ -5377,7 +5826,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     this.selected = /* @__PURE__ */ new Set();
     this.updateSelection();
     this.refreshTools();
-    new import_obsidian5.Notice(removed > 1 ? `\u5DF2\u89E3\u9664 ${removed} \u4E2A\u5206\u7EC4` : "\u5DF2\u89E3\u9664\u5206\u7EC4");
+    new import_obsidian6.Notice(removed > 1 ? `\u5DF2\u89E3\u9664 ${removed} \u4E2A\u5206\u7EC4` : "\u5DF2\u89E3\u9664\u5206\u7EC4");
     return true;
   }
   /** A group frame goes through the same confirmation and never offers source deletion. */
@@ -5400,7 +5849,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       }, (next) => this.boardPath === boardPath ? mutator(next) : false);
     } catch (error) {
       if ((error == null ? void 0 : error.code) === BOARD_WRITES_PAUSED) {
-        new import_obsidian5.Notice("\u753B\u677F\u6B63\u5728\u5207\u6362\u6216\u5173\u95ED\uFF0C\u672C\u6B21\u4FEE\u6539\u672A\u4FDD\u5B58");
+        new import_obsidian6.Notice("\u753B\u677F\u6B63\u5728\u5207\u6362\u6216\u5173\u95ED\uFF0C\u672C\u6B21\u4FEE\u6539\u672A\u4FDD\u5B58");
         return false;
       }
       throw error;
@@ -5447,7 +5896,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
     try {
       await this.plugin.boardStore.save(boardPath, next, { token: this });
     } catch (error) {
-      new import_obsidian5.Notice(`${failureLabel}\uFF0C\u753B\u677F\u672A\u6539\u52A8\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`${failureLabel}\uFF0C\u753B\u677F\u672A\u6539\u52A8\uFF1A${error.message}`);
       return false;
     }
     if (this.boardPath === boardPath) {
@@ -5463,12 +5912,12 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   async importReadFlow() {
     if (!this.isWritable()) return false;
     if (this.readflowButton) this.readflowButton.disabled = true;
-    const scanning = new import_obsidian5.Notice("\u6B63\u5728\u626B\u63CF ReadFlow \u6458\u5F55\u2026", 0);
+    const scanning = new import_obsidian6.Notice("\u6B63\u5728\u626B\u63CF ReadFlow \u6458\u5F55\u2026", 0);
     let scan;
     try {
       scan = await this.plugin.scanReadFlowCandidates();
     } catch (error) {
-      new import_obsidian5.Notice(`\u626B\u63CF\u5931\u8D25\uFF1A${error.message}`);
+      new import_obsidian6.Notice(`\u626B\u63CF\u5931\u8D25\uFF1A${error.message}`);
       return false;
     } finally {
       scanning.hide();
@@ -5506,10 +5955,10 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
       return true;
     }, "\u5BFC\u5165\u5931\u8D25");
     if (!done) {
-      new import_obsidian5.Notice(`\u6CA1\u6709\u65B0\u589E\u5361\u7247\uFF1A\u5DF2\u5B58\u5728 ${alreadyOnBoard} \u4E2A\uFF0C\u5931\u8D25 ${missing} \u4E2A\u3002`);
+      new import_obsidian6.Notice(`\u6CA1\u6709\u65B0\u589E\u5361\u7247\uFF1A\u5DF2\u5B58\u5728 ${alreadyOnBoard} \u4E2A\uFF0C\u5931\u8D25 ${missing} \u4E2A\u3002`);
       return false;
     }
-    new import_obsidian5.Notice(`\u5DF2\u52A0\u5165 ${placed} \u5F20\u5361\u7247\uFF1B\u5DF2\u5B58\u5728 ${alreadyOnBoard} \u4E2A\uFF1B\u8DF3\u8FC7 ${missing + scan.skipped.length} \u4E2A\u3002`);
+    new import_obsidian6.Notice(`\u5DF2\u52A0\u5165 ${placed} \u5F20\u5361\u7247\uFF1B\u5DF2\u5B58\u5728 ${alreadyOnBoard} \u4E2A\uFF1B\u8DF3\u8FC7 ${missing + scan.skipped.length} \u4E2A\u3002`);
     return true;
   }
   nodeName(id) {
@@ -5559,7 +6008,7 @@ var KnowledgeCanvasView = class extends import_obsidian5.ItemView {
   }
   async performOpenFullView() {
     if (this.editor && !await this.editor.close()) {
-      new import_obsidian5.Notice("\u6D6E\u52A8\u7F16\u8F91\u5668\u4ECD\u6709\u672A\u4FDD\u5B58\u5185\u5BB9\uFF0C\u5DF2\u53D6\u6D88\u6253\u5F00\u5168\u5C4F");
+      new import_obsidian6.Notice("\u6D6E\u52A8\u7F16\u8F91\u5668\u4ECD\u6709\u672A\u4FDD\u5B58\u5185\u5BB9\uFF0C\u5DF2\u53D6\u6D88\u6253\u5F00\u5168\u5C4F");
       return false;
     }
     const pause = this.boardMutations.pause();
@@ -5659,7 +6108,7 @@ async function destroyEmbeddedControllers(set) {
 }
 
 // src/settings-tab.js
-var import_obsidian6 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 var STATUS_CLASS = {
   exists: "is-ok",
   create: "is-info",
@@ -5673,7 +6122,7 @@ function describe(preview) {
   if (preview.rewritten) parts.push(`\uFF08\u5DF2\u89C4\u8303\u5316\u4E3A ${preview.folder}\uFF09`);
   return parts.join(" ");
 }
-var KnowledgeCanvasSettingTab = class extends import_obsidian6.PluginSettingTab {
+var KnowledgeCanvasSettingTab = class extends import_obsidian7.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -5692,7 +6141,7 @@ var KnowledgeCanvasSettingTab = class extends import_obsidian6.PluginSettingTab 
       hintEl.setText(describe(preview));
       hintEl.className = `kc-setting-hint ${(_a = STATUS_CLASS[preview.status]) != null ? _a : ""}`.trim();
     };
-    new import_obsidian6.Setting(containerEl).setName("\u4FBF\u5229\u8D34\u5B58\u653E\u6587\u4EF6\u5939").setDesc("\u65B0\u5EFA\u4FBF\u5229\u8D34\u65F6\u751F\u6210\u7684 Markdown \u6587\u4EF6\u653E\u5728\u8FD9\u4E2A\u76EE\u5F55\u4E0B\u3002\u6539\u5B8C\u7ACB\u5373\u751F\u6548\uFF0C\u4E0D\u7528\u91CD\u542F Obsidian\u3002").addText((text) => {
+    new import_obsidian7.Setting(containerEl).setName("\u4FBF\u5229\u8D34\u5B58\u653E\u6587\u4EF6\u5939").setDesc("\u65B0\u5EFA\u4FBF\u5229\u8D34\u65F6\u751F\u6210\u7684 Markdown \u6587\u4EF6\u653E\u5728\u8FD9\u4E2A\u76EE\u5F55\u4E0B\u3002\u6539\u5B8C\u7ACB\u5373\u751F\u6548\uFF0C\u4E0D\u7528\u91CD\u542F Obsidian\u3002").addText((text) => {
       text.setPlaceholder(DEFAULT_SETTINGS.noteFolder);
       text.setValue(this.plugin.settings.noteFolder);
       text.inputEl.addClass("kc-setting-folder-input");
@@ -5711,7 +6160,7 @@ var KnowledgeCanvasSettingTab = class extends import_obsidian6.PluginSettingTab 
     }));
     hintEl = containerEl.createDiv({ cls: "kc-setting-hint" });
     renderHint(this.plugin.settings.noteFolder);
-    new import_obsidian6.Setting(containerEl).setName("\u542F\u7528 ReadFlow \u96C6\u6210").setDesc("\u663E\u793A\u300C\u5BFC\u5165 ReadFlow\u300D\u5165\u53E3\uFF0C\u5E76\u5141\u8BB8 ReadFlow \u4E3A\u6BCF\u672C\u4E66\u5D4C\u5165\u72EC\u7ACB\u77E5\u8BC6\u753B\u677F\u3002\u5173\u95ED\u540E\u4E0D\u5220\u9664\u4EFB\u4F55\u5DF2\u5BFC\u5165\u7684\u6570\u636E\u3002").addToggle((toggle) => {
+    new import_obsidian7.Setting(containerEl).setName("\u542F\u7528 ReadFlow \u96C6\u6210").setDesc("\u663E\u793A\u300C\u5BFC\u5165 ReadFlow\u300D\u5165\u53E3\uFF0C\u5E76\u5141\u8BB8 ReadFlow \u4E3A\u6BCF\u672C\u4E66\u5D4C\u5165\u72EC\u7ACB\u77E5\u8BC6\u753B\u677F\u3002\u5173\u95ED\u540E\u4E0D\u5220\u9664\u4EFB\u4F55\u5DF2\u5BFC\u5165\u7684\u6570\u636E\u3002").addToggle((toggle) => {
       toggle.setValue(this.plugin.settings.readFlowIntegrationEnabled);
       toggle.onChange(async (value) => {
         var _a, _b;
@@ -5724,7 +6173,7 @@ var KnowledgeCanvasSettingTab = class extends import_obsidian6.PluginSettingTab 
         } catch (error) {
           this.plugin.settings.readFlowIntegrationEnabled = previous;
           toggle.setValue(previous);
-          new import_obsidian6.Notice(`\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}`);
+          new import_obsidian7.Notice(`\u4FDD\u5B58\u5931\u8D25\uFF1A${error.message}`);
         }
       });
     });
@@ -5732,7 +6181,7 @@ var KnowledgeCanvasSettingTab = class extends import_obsidian6.PluginSettingTab 
 };
 
 // src/main.js
-var KnowledgeCanvasPlugin = class extends import_obsidian7.Plugin {
+var KnowledgeCanvasPlugin = class extends import_obsidian8.Plugin {
   async onload() {
     this.settings = normalizeSettings(null);
     await this.loadSettings();
@@ -5745,6 +6194,7 @@ var KnowledgeCanvasPlugin = class extends import_obsidian7.Plugin {
     this.embeddedControllers = /* @__PURE__ */ new Set();
     this.readFlowIntegrationListeners = /* @__PURE__ */ new Set();
     this.readFlowEnsureQueues = /* @__PURE__ */ new Map();
+    this.renameSuppressions = /* @__PURE__ */ new Set();
     this.addSettingTab(new KnowledgeCanvasSettingTab(this.app, this));
     this.registerView(VIEW_TYPE_KNOWLEDGE_CANVAS, (leaf) => new KnowledgeCanvasView(leaf, this));
     this.addRibbonIcon("layout-dashboard", "\u6253\u5F00\u77E5\u8BC6\u753B\u677F", () => this.activate());
@@ -5768,7 +6218,7 @@ var KnowledgeCanvasPlugin = class extends import_obsidian7.Plugin {
       await Promise.all([this.boardStore.flush(), this.repository.flush()]);
       this.app.workspace.detachLeavesOfType(VIEW_TYPE_KNOWLEDGE_CANVAS);
     } catch (error) {
-      new import_obsidian7.Notice(`\u77E5\u8BC6\u753B\u677F\u4ECD\u6709\u672A\u4FDD\u5B58\u5185\u5BB9\uFF1A${error.message}`);
+      new import_obsidian8.Notice(`\u77E5\u8BC6\u753B\u677F\u4ECD\u6709\u672A\u4FDD\u5B58\u5185\u5BB9\uFF1A${error.message}`);
       throw error;
     }
   }
@@ -5816,6 +6266,162 @@ var KnowledgeCanvasPlugin = class extends import_obsidian7.Plugin {
     }
     await this.app.vault.create(path, JSON.stringify(board, null, 2));
     return path;
+  }
+  /** Every Vault `.canvas`, for rename/delete validation against the live file system. */
+  listCanvasPaths() {
+    return this.app.vault.getFiles().filter((file) => file.extension === "canvas").map((file) => file.path);
+  }
+  /** Every Vault file, for the dedicated-folder safety analysis. */
+  listFilePaths() {
+    return this.app.vault.getFiles().map((file) => file.path);
+  }
+  /** Every Vault folder, for target-conflict checks. */
+  listFolderPaths() {
+    return this.app.vault.getAllLoadedFiles().filter((item) => item instanceof import_obsidian8.TFolder).map((folder) => folder.path).filter(Boolean);
+  }
+  /**
+   * Renames a managed board, optionally moving the note folder that belongs to it.
+   *
+   * The order is the one the design fixes: verify against the live Vault → rename the folder
+   * → rewrite this board's metadata and references → repoint every other board that pointed
+   * into the folder → rename the canvas → update settings and live surfaces. A failure after
+   * the first move rolls back what moved; a rollback that also fails reports both paths
+   * instead of pretending the rename succeeded.
+   */
+  async renameBoard(plan, { board = null, token = null } = {}) {
+    var _a;
+    const manage = canManageBoard(plan == null ? void 0 : plan.fromPath);
+    if (!manage.allowed) throw new Error(manage.reason);
+    if (!((_a = this.app.vault.getAbstractFileByPath(plan.fromPath)) == null ? void 0 : _a.stat)) throw new Error("\u753B\u5E03\u4E0D\u5B58\u5728");
+    if (this.app.vault.getAbstractFileByPath(plan.toPath)) throw new Error(`\u753B\u5E03\u5DF2\u5B58\u5728\uFF1A${plan.toPath}`);
+    if (plan.noteFolder && this.app.vault.getAbstractFileByPath(plan.noteFolder.to)) {
+      throw new Error(`\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\u5DF2\u5B58\u5728\uFF1A${plan.noteFolder.to}`);
+    }
+    const nextBoard = board ? applyBoardRename(board, plan) : board;
+    let folderMoved = false;
+    let boardSaved = false;
+    const suppression = plan.noteFolder && token ? { folder: plan.noteFolder.from, view: token } : null;
+    if (suppression) this.renameSuppressions.add(suppression);
+    try {
+      if (plan.noteFolder) {
+        const folder = this.app.vault.getAbstractFileByPath(plan.noteFolder.from);
+        if (folder) {
+          await this.app.fileManager.renameFile(folder, plan.noteFolder.to);
+          folderMoved = true;
+        }
+      }
+      if (nextBoard && nextBoard !== board) {
+        await this.boardStore.save(plan.fromPath, nextBoard, { token });
+        boardSaved = true;
+      }
+      if (folderMoved) await this.repointBoardsForFolder(plan.noteFolder, plan.fromPath);
+      await this.app.fileManager.renameFile(
+        this.app.vault.getAbstractFileByPath(plan.fromPath),
+        plan.toPath
+      );
+    } catch (error) {
+      const recovery = [];
+      if (boardSaved) {
+        try {
+          await this.boardStore.save(plan.fromPath, board, { token });
+        } catch (restoreError) {
+          recovery.push(`\u753B\u5E03\u5185\u5BB9\u6062\u590D\u5931\u8D25\uFF1A${restoreError.message}`);
+        }
+      }
+      if (folderMoved) {
+        try {
+          await this.app.fileManager.renameFile(
+            this.app.vault.getAbstractFileByPath(plan.noteFolder.to),
+            plan.noteFolder.from
+          );
+        } catch (restoreError) {
+          recovery.push(`\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\u5DF2\u91CD\u547D\u540D\u4E3A ${plan.noteFolder.to}\uFF0C\u6062\u590D\u5931\u8D25\uFF1A${restoreError.message}`);
+        }
+      }
+      throw new Error(recovery.length ? `${error.message}\uFF08${recovery.join("\uFF1B")}\uFF09` : error.message);
+    } finally {
+      if (suppression) this.renameSuppressions.delete(suppression);
+    }
+    for (const controller of [...this.embeddedControllers]) {
+      if (controller.boardPath !== plan.fromPath) continue;
+      try {
+        await controller.setBoardPath(plan.toPath);
+      } catch (error) {
+        console.error("\u77E5\u8BC6\u753B\u677F\uFF1A\u91CD\u547D\u540D\u540E\u672A\u80FD\u66F4\u65B0\u5D4C\u5165\u753B\u677F", error);
+      }
+    }
+    const bindings = updateReadFlowBindings(this.settings.readFlowBindings, { from: plan.fromPath, to: plan.toPath });
+    if (bindings.changed) this.settings.readFlowBindings = bindings.bindings;
+    if (this.settings.lastBoardPath === plan.fromPath) await this.setLastBoardPath(plan.toPath);
+    else await this.saveSettings();
+    return { path: plan.toPath, name: plan.name, board: nextBoard, folderMoved };
+  }
+  /**
+   * Markdown that lived in the renamed folder keeps its identity only through the paths other
+   * boards store, so they follow the move instead of turning into missing cards. Open views
+   * and embedded surfaces are skipped: they own their writer and receive the Vault's own
+   * rename events.
+   */
+  async repointBoardsForFolder({ from, to }, exceptPath) {
+    var _a;
+    const openInViews = /* @__PURE__ */ new Set();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_KNOWLEDGE_CANVAS)) {
+      if ((_a = leaf.view) == null ? void 0 : _a.boardPath) openInViews.add(leaf.view.boardPath);
+    }
+    for (const controller of this.embeddedControllers) openInViews.add(controller.boardPath);
+    const failures = [];
+    for (const board of this.listMaintainedBoards()) {
+      if (board.path === exceptPath || openInViews.has(board.path) || !this.isCanvasFile(board.path)) continue;
+      try {
+        const data = await this.boardStore.load(board.path);
+        const updated = rewriteFolderReferences(data, from, to);
+        if (updated !== data) await this.boardStore.save(board.path, updated);
+      } catch (error) {
+        failures.push(`${board.path}\uFF1A${error.message}`);
+      }
+    }
+    if (failures.length) new import_obsidian8.Notice(`\u90E8\u5206\u753B\u5E03\u672A\u80FD\u66F4\u65B0\u6587\u4EF6\u8DEF\u5F84\uFF1A${failures.join("\uFF1B")}`);
+  }
+  /**
+   * Trashes a managed board and, when the caller proved it safe, its note folder. The canvas
+   * goes first: a folder failure must not leave the user with deleted notes and a live board.
+   * A live embedded surface on that board is torn down first, or its next save would
+   * recreate the file this method just deleted.
+   */
+  async deleteBoard(path, { deleteNoteFolder = null } = {}) {
+    const manage = canManageBoard(path);
+    if (!manage.allowed) throw new Error(manage.reason);
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file == null ? void 0 : file.stat)) throw new Error("\u753B\u5E03\u4E0D\u5B58\u5728");
+    for (const controller of [...this.embeddedControllers]) {
+      if (controller.boardPath !== path) continue;
+      try {
+        await controller.destroy();
+      } catch (error) {
+        throw new Error(`\u5D4C\u5165\u753B\u677F\u4ECD\u6709\u672A\u4FDD\u5B58\u5185\u5BB9\uFF0C\u5DF2\u53D6\u6D88\u5220\u9664\uFF1A${error.message}`);
+      }
+    }
+    await this.app.fileManager.trashFile(file);
+    let folder = null;
+    if (deleteNoteFolder) {
+      const target = this.app.vault.getAbstractFileByPath(deleteNoteFolder);
+      if (target) {
+        try {
+          await this.app.fileManager.trashFile(target);
+          folder = { path: deleteNoteFolder, ok: true };
+        } catch (error) {
+          folder = { path: deleteNoteFolder, ok: false, reason: error.message };
+        }
+      }
+    }
+    const bindings = updateReadFlowBindings(this.settings.readFlowBindings, { from: path, to: null });
+    if (bindings.changed) this.settings.readFlowBindings = bindings.bindings;
+    await this.setLastBoardPath(DEFAULT_BOARD_PATH);
+    await this.ensureBoard();
+    const parts = ["\u753B\u5E03\u5DF2\u5220\u9664"];
+    if (folder == null ? void 0 : folder.ok) parts.push(`\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\u5DF2\u5220\u9664\uFF1A${folder.path}`);
+    if (folder && !folder.ok) parts.push(`\u4E13\u5C5E\u7B14\u8BB0\u6587\u4EF6\u5939\u672A\u80FD\u5220\u9664\uFF1A${folder.path}\uFF08${folder.reason}\uFF09`);
+    return { path, folder, message: parts.join("\uFF1B") };
   }
   async setLastBoardPath(path) {
     this.boardPath = path;
@@ -6031,11 +6637,13 @@ var KnowledgeCanvasPlugin = class extends import_obsidian7.Plugin {
    */
   async onFileRename(file, oldPath) {
     if (!oldPath.toLowerCase().endsWith(".md") || !file.path.toLowerCase().endsWith(".md")) return;
+    const suppressed = (view) => [...this.renameSuppressions].some((entry) => entry.view === view && isInsideFolderPath(oldPath, entry.folder));
     const failures = [];
     const openInViews = /* @__PURE__ */ new Set();
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_KNOWLEDGE_CANVAS)) {
       const view = leaf.view;
       openInViews.add(view.boardPath);
+      if (suppressed(view)) continue;
       try {
         await view.handleRename(file, oldPath);
       } catch (error) {
@@ -6061,6 +6669,6 @@ var KnowledgeCanvasPlugin = class extends import_obsidian7.Plugin {
         failures.push(`${board.path}\uFF1A${error.message}`);
       }
     }
-    if (failures.length) new import_obsidian7.Notice(`\u90E8\u5206\u753B\u5E03\u672A\u80FD\u66F4\u65B0\u6587\u4EF6\u8DEF\u5F84\uFF1A${failures.join("\uFF1B")}`);
+    if (failures.length) new import_obsidian8.Notice(`\u90E8\u5206\u753B\u5E03\u672A\u80FD\u66F4\u65B0\u6587\u4EF6\u8DEF\u5F84\uFF1A${failures.join("\uFF1B")}`);
   }
 };

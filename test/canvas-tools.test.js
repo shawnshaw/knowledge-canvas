@@ -33,8 +33,12 @@ test('the tool entry no longer duplicates the ReadFlow import', () => {
 });
 
 test('the top bar owns the ReadFlow import, immediately after New Board', () => {
-  assert.deepEqual(TOPBAR_BOARD_ACTIONS, ['boardSelect', 'newBoard', 'importReadFlow']);
-  assert.equal(TOPBAR_BOARD_ACTIONS.at(-1), 'importReadFlow');
+  assert.deepEqual(TOPBAR_BOARD_ACTIONS, ['boardSelect', 'newBoard', 'importReadFlow', 'boardMenu']);
+  assert.equal(TOPBAR_BOARD_ACTIONS.indexOf('importReadFlow'), TOPBAR_BOARD_ACTIONS.indexOf('newBoard') + 1);
+});
+
+test('board management is the last action in the top bar', () => {
+  assert.equal(TOPBAR_BOARD_ACTIONS.at(-1), 'boardMenu');
 });
 
 test('toggling twice returns to the collapsed entry', () => {

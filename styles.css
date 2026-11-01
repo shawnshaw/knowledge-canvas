@@ -44,7 +44,8 @@
 .knowledge-canvas-view select { font: inherit; }
 .knowledge-canvas-view .kc-board-select { min-height: 34px; max-width: 220px; padding: 4px 8px; border: 1px solid var(--kc-border); border-radius: 8px; background: var(--kc-elevated); color: var(--kc-text); }
 .knowledge-canvas-view .kc-board-create { flex: 0 0 auto; min-width: 34px; padding: 4px 10px; }
-.knowledge-canvas-view .kc-board-select:focus-visible, .knowledge-canvas-view .kc-board-create:focus-visible { outline: 2px solid var(--kc-primary); outline-offset: 2px; }
+.knowledge-canvas-view .kc-board-menu { flex: 0 0 auto; min-width: 34px; padding: 4px 8px; letter-spacing: 1px; }
+.knowledge-canvas-view .kc-board-select:focus-visible, .knowledge-canvas-view .kc-board-create:focus-visible, .knowledge-canvas-view .kc-board-menu:focus-visible { outline: 2px solid var(--kc-primary); outline-offset: 2px; }
 .knowledge-canvas-view .kc-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background-color: var(--kc-canvas); background-image: radial-gradient(circle, color-mix(in srgb, var(--kc-secondary) 30%, transparent) 1px, transparent 1px); background-size: 24px 24px; touch-action: none; }
 .knowledge-canvas-view .kc-world { position: absolute; inset: 0; transform-origin: 0 0; }
 /* Marquee band: pure decoration, never intercepts the pointer mid-drag. */
@@ -182,6 +183,7 @@
 .kc-input-field--checkbox label { color: var(--text-normal); font-weight: var(--font-normal); }
 .kc-input-field input, .kc-input-field textarea { box-sizing: border-box; width: 100%; }
 .kc-input-field textarea { min-height: 150px; resize: vertical; }
+.kc-input-hint { margin: -4px 0 0; color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .kc-setting-folder-input { width: 100%; max-width: 360px; }
 .kc-setting-hint { margin-top: 6px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .kc-setting-hint.is-ok { color: var(--text-success, var(--text-muted)); }

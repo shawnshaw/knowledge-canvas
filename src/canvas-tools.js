@@ -9,9 +9,11 @@ export const TOOL_ENTRY_BASE_ACTIONS = Object.freeze(['sticky', 'importFile', 'i
 /**
  * The top bar's board cluster, in the order the design fixes it: the switcher, then New Board,
  * then the ReadFlow import as a secondary action. Keeping the import here is what stops the
- * expanded tool entry from offering a second, duplicate entry point.
+ * expanded tool entry from offering a second, duplicate entry point. The `···` management
+ * menu closes the cluster, so a rename or delete is never one stray click away from the
+ * actions used while working.
  */
-export const TOPBAR_BOARD_ACTIONS = Object.freeze(['boardSelect', 'newBoard', 'importReadFlow']);
+export const TOPBAR_BOARD_ACTIONS = Object.freeze(['boardSelect', 'newBoard', 'importReadFlow', 'boardMenu']);
 
 export function createToolEntryState() {
   return { expanded: false };

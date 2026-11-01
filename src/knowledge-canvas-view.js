@@ -33,6 +33,14 @@ import { TOPBAR_BOARD_ACTIONS, createToolEntryState, reduceToolEntry, toolEntryV
 import { applyLayoutPatch, layoutPatch } from './canvas-layout.js';
 import { dragBounds, snapLines, snapRect, snapThreshold } from './canvas-snap.js';
 import { boardNoteFolder } from './board-meta.js';
+import {
+  analyzeBoardNoteFolder,
+  boardNameFromPath,
+  canManageBoard,
+  planBoardRename,
+} from './board-management.js';
+import { requestBoardDelete, requestBoardRename } from './board-management-modal.js';
+import { DEFAULT_BOARD_PATH } from './board-catalog.js';
 import { canMutateBoard } from './board-capabilities.js';
 import { BOARD_WRITES_PAUSED, createMutationQueue, runBoardMutation } from './board-mutations.js';
 import { createSourceSavedHandler } from './editor-bridge.js';
@@ -228,6 +236,7 @@ export class KnowledgeCanvasView extends ItemView {
     this.switching = false;
     this.boardSelect = null;
     this.boardCreateButton = null;
+    this.boardMenuButton = null;
     this.readflowButton = null;
     this.toolEntry = createToolEntryState();
     this.toolEntryEl = null;
@@ -611,6 +620,7 @@ export class KnowledgeCanvasView extends ItemView {
       boardSelect: () => this.buildBoardSelect(),
       newBoard: () => this.buildNewBoardButton(),
       importReadFlow: () => this.buildImportReadFlowButton(),
+      boardMenu: () => this.buildBoardMenuButton(),
     };
     for (const action of TOPBAR_BOARD_ACTIONS) {
       if (action === 'importReadFlow' && !this.plugin.isReadFlowIntegrationEnabled()) continue;
@@ -654,6 +664,204 @@ export class KnowledgeCanvasView extends ItemView {
     return button;
   }
 
+  /**
+   * Low-frequency, potentially destructive board actions live behind `···`: renaming and
+   * deleting a workspace is never a click away from the actions used while working.
+   */
+  buildBoardMenuButton() {
+    const button = dom('button', 'kc-board-menu', '···');
+    button.type = 'button';
+    button.setAttribute('aria-label', '画布管理');
+    button.setAttribute('aria-haspopup', 'menu');
+    button.addEventListener('click', (event) => this.openBoardMenu(event));
+    this.boardMenuButton = button;
+    return button;
+  }
+
+  openBoardMenu(event) {
+    const manage = canManageBoard(this.boardPath);
+    const menu = new Menu();
+    menu.addItem((item) => item
+      .setTitle('重命名画布')
+      .setIcon('pencil')
+      .setDisabled(!manage.allowed)
+      .onClick(() => this.renameBoard()));
+    menu.addItem((item) => item
+      .setTitle('删除画布')
+      .setIcon('trash-2')
+      .setDisabled(!manage.allowed)
+      .onClick(() => this.deleteBoard()));
+    if (!manage.allowed) {
+      menu.addSeparator();
+      menu.addItem((item) => item.setTitle(manage.reason).setDisabled(true));
+    }
+    menu.showAtMouseEvent(event);
+  }
+
+  /** Opens the rename dialog. A cancelled dialog changes nothing. */
+  async renameBoard() {
+    const manage = canManageBoard(this.boardPath);
+    if (!manage.allowed) {
+      new Notice(manage.reason);
+      return false;
+    }
+    const noteFolder = boardNoteFolder(this.board);
+    const existingPaths = this.plugin.listCanvasPaths();
+    const folderPaths = this.plugin.listFolderPaths();
+    const answer = await requestBoardRename(this.app, {
+      currentName: boardNameFromPath(this.boardPath),
+      noteFolder,
+      validate: (values) => {
+        try {
+          planBoardRename({
+            path: this.boardPath,
+            name: values.name,
+            existingPaths,
+            folderPaths,
+            noteFolder,
+            renameNoteFolder: values.renameNoteFolder,
+          });
+          return null;
+        } catch (error) {
+          return error.message;
+        }
+      },
+    });
+    if (!answer) return false;
+    return this.lifecycles(() => this.performRenameBoard(answer));
+  }
+
+  /**
+   * Renames inside the lifecycle queue, so a switch, reload or hand-off can never interleave
+   * with the path swap. The view keeps its board until the plugin reports the file is really
+   * at its new path; a failure leaves both the path and the board untouched.
+   */
+  async performRenameBoard({ name, renameNoteFolder }) {
+    if (!this.isWritable()) return false;
+    if (this.editor && !(await this.editor.close())) return false;
+
+    const previousPath = this.boardPath;
+    let plan;
+    try {
+      plan = planBoardRename({
+        path: previousPath,
+        name,
+        existingPaths: this.plugin.listCanvasPaths(),
+        folderPaths: this.plugin.listFolderPaths(),
+        noteFolder: boardNoteFolder(this.board),
+        renameNoteFolder,
+      });
+    } catch (error) {
+      new Notice(`无法重命名画布：${error.message}`);
+      return false;
+    }
+
+    const pause = this.boardMutations.pause();
+    this.setBoardControlsDisabled(true);
+    try {
+      await this.drainBoardWrites();
+      const result = await this.plugin.renameBoard(plan, { board: this.board, token: this });
+      this.releaseBoardWriter(previousPath);
+      this.boardPath = result.path;
+      this.board = result.board;
+      this.loadError = null;
+      await this.plugin.setLastBoardPath(result.path);
+      this.acquireBoardWriter();
+      new Notice(`画布已重命名为「${result.name}」`);
+      return true;
+    } catch (error) {
+      new Notice(`重命名画布失败：${error.message}`);
+      return false;
+    } finally {
+      this.boardMutations.resume(pause);
+      this.setBoardControlsDisabled(false);
+      this.refreshBoardList();
+      this.render();
+    }
+  }
+
+  /** Opens the delete dialog. The note folder is offered only when proven safe. */
+  async deleteBoard() {
+    const manage = canManageBoard(this.boardPath);
+    if (!manage.allowed) {
+      new Notice(manage.reason);
+      return false;
+    }
+    const noteFolder = boardNoteFolder(this.board);
+    const analysis = noteFolder
+      ? analyzeBoardNoteFolder({
+        folderPath: noteFolder,
+        files: this.plugin.listFilePaths(),
+        folders: this.plugin.listFolderPaths(),
+        board: this.board,
+      })
+      : { deletable: false, reason: '该画布没有专属笔记文件夹' };
+    const answer = await requestBoardDelete(this.app, {
+      name: boardNameFromPath(this.boardPath),
+      noteFolder,
+      folderDeletable: analysis.deletable,
+      folderReason: analysis.reason,
+    });
+    if (!answer) return false;
+    return this.lifecycles(() => this.performDeleteBoard(answer));
+  }
+
+  /**
+   * Deletes the canvas (and only the note folder the user opted into), then falls back to the
+   * default board. The folder is re-scanned right before deletion: a note added while the
+   * confirmation was open cancels the whole operation instead of being destroyed.
+   */
+  async performDeleteBoard({ deleteNoteFolder }) {
+    if (!this.isWritable()) return false;
+    if (this.editor && !(await this.editor.close())) return false;
+
+    const path = this.boardPath;
+    const noteFolder = boardNoteFolder(this.board);
+    if (deleteNoteFolder && noteFolder) {
+      const recheck = analyzeBoardNoteFolder({
+        folderPath: noteFolder,
+        files: this.plugin.listFilePaths(),
+        folders: this.plugin.listFolderPaths(),
+        board: this.board,
+      });
+      if (!recheck.deletable) {
+        new Notice(`专属笔记文件夹内容已变化，已取消删除：${recheck.reason}`);
+        return false;
+      }
+    }
+
+    const pause = this.boardMutations.pause();
+    this.setBoardControlsDisabled(true);
+    try {
+      await this.drainBoardWrites();
+      const outcome = await this.plugin.deleteBoard(path, {
+        deleteNoteFolder: deleteNoteFolder && noteFolder ? noteFolder : null,
+      });
+      // The deleted board's write token dies with it; the fallback board needs a fresh one.
+      this.releaseBoardWriter(path);
+      await this.plugin.ensureBoard();
+      const fallback = this.plugin.resolveBoardPath(DEFAULT_BOARD_PATH);
+      const next = await this.plugin.boardStore.load(fallback);
+      this.boardPath = fallback;
+      this.board = next;
+      this.selected.clear();
+      this.search = '';
+      this.loadError = null;
+      await this.plugin.setLastBoardPath(fallback);
+      this.acquireBoardWriter();
+      new Notice(outcome.message);
+      return true;
+    } catch (error) {
+      new Notice(`删除画布失败：${error.message}`);
+      return false;
+    } finally {
+      this.boardMutations.resume(pause);
+      this.setBoardControlsDisabled(false);
+      this.refreshBoardList();
+      this.render();
+    }
+  }
+
   refreshBoardList() {
     const select = this.boardSelect;
     if (!select) return;
@@ -678,6 +886,7 @@ export class KnowledgeCanvasView extends ItemView {
     this.switching = disabled;
     if (this.boardSelect) this.boardSelect.disabled = disabled;
     if (this.boardCreateButton) this.boardCreateButton.disabled = disabled;
+    if (this.boardMenuButton) this.boardMenuButton.disabled = disabled;
   }
 
   /**
