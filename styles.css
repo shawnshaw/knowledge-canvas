@@ -178,11 +178,13 @@
 .kc-input-form { display: grid; gap: 16px; }
 .kc-input-field { display: grid; gap: 6px; }
 .kc-input-field label { color: var(--text-muted); font-size: var(--font-ui-small); font-weight: var(--font-semibold); }
-.kc-input-field--checkbox { grid-template-columns: auto 1fr; align-items: center; gap: 8px; }
-.kc-input-field--checkbox input { width: auto; margin: 0; }
-.kc-input-field--checkbox label { color: var(--text-normal); font-weight: var(--font-normal); }
 .kc-input-field input, .kc-input-field textarea { box-sizing: border-box; width: 100%; }
 .kc-input-field textarea { min-height: 150px; resize: vertical; }
+.kc-input-field--checkbox { grid-template-columns: auto 1fr; align-items: center; gap: 8px; }
+/* A checkbox is not a text field: the 100% width above would collapse it to nothing inside
+   the auto-sized grid track, leaving an unclickable sliver. */
+.kc-input-field--checkbox input { width: var(--checkbox-size, 16px); height: var(--checkbox-size, 16px); min-width: var(--checkbox-size, 16px); margin: 0; }
+.kc-input-field--checkbox label { color: var(--text-normal); font-weight: var(--font-normal); }
 .kc-input-hint { margin: -4px 0 0; color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .kc-setting-folder-input { width: 100%; max-width: 360px; }
 .kc-setting-hint { margin-top: 6px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
